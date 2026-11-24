@@ -236,6 +236,7 @@ pub(crate) fn fresh(dir: &Path) -> Result<(), String> {
 
 pub fn run(o: &Options) -> Result<Report, String> {
     let wall = Instant::now();
+    swarm::begin_run();
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let (common, items) = tasks(&o.task);
     let (mode, tag) = match o.how {

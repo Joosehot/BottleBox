@@ -11,6 +11,18 @@ use std::io::{IsTerminal, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// When the run began: the log's lines give the whole run's time beside the step's.
+static RUN: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// A run begins: its clock starts.
+pub fn begin_run() {
+    *RUN.lock().unwrap() = Some(Instant::now());
+}
+
+fn run_s() -> f64 {
+    RUN.lock().unwrap().map_or(0.0, |t| t.elapsed().as_secs_f64())
+}
+
 /// How long the first agent runs alone before the rest start (seconds).
 const WARM: f64 = 3.0;
 
@@ -81,7 +93,7 @@ pub fn run(title: &str, setup: &Setup, asks: Vec<Ask>, n: usize) -> Vec<Result<A
     let results: Arc<Mutex<Vec<Option<Result<Answer, String>>>>> = Arc::new(Mutex::new(vec![None; asks.len()]));
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if !live {
-        println!("-- {title}: {} agents", asks.len());
+        println!("-- [run {:6.1} s] {title}: {} agents", run_s(), asks.len());
     }
     std::thread::scope(|scope| {
         // the board, redrawn five times a second
@@ -112,7 +124,7 @@ pub fn run(title: &str, setup: &Setup, asks: Vec<Ask>, n: usize) -> Vec<Result<A
                 let set = |s: &str| {
                     let mut b = board.lock().unwrap();
                     if !live && b.rows[i].state != s {
-                        println!("[{:7.1} s] {} {s}", b.began.elapsed().as_secs_f64(), b.rows[i].id);
+                        println!("[run {:6.1} s | step {:6.1} s] {} {s}", run_s(), b.began.elapsed().as_secs_f64(), b.rows[i].id);
                     }
                     b.rows[i].state = s.to_string();
                 };
@@ -130,7 +142,7 @@ pub fn run(title: &str, setup: &Setup, asks: Vec<Ask>, n: usize) -> Vec<Result<A
                     }
                     let (id, state, secs, tokens) = (row.id.clone(), row.state.clone(), row.seconds.unwrap_or(0.0), row.tokens);
                     if !live {
-                        println!("[{:7.1} s] {id} {state} in {secs:.1} s, {tokens} tokens", b.began.elapsed().as_secs_f64());
+                        println!("[run {:6.1} s | step {:6.1} s] {id} {state} in {secs:.1} s, {tokens} tokens", run_s(), b.began.elapsed().as_secs_f64());
                     }
                 }
                 results.lock().unwrap()[i] = Some(r);

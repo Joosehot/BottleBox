@@ -8,11 +8,12 @@
 //!    API (registered in the registry, so it is claimed and nobody else builds
 //!    it) and its decisions; a tests' minion its test cases with their exact
 //!    answers. Every thought goes on the board.
-//! 2. **Build, all at once**: every minion gets the whole Box (the registry
-//!    and the board: everyone's thinking, the same text for all, so the
-//!    prompt cache holds it once) and its own slice, and writes its file: an
-//!    implementation to its registered API, so that its pair's cases pass; the
-//!    tests to its pair's API, with its own cases.
+//! 2. **Build, all at once**: the shared prefix is the one the cache holds
+//!    already (the rules and the task); every minion gets only its slice of
+//!    the Box: its module's registered API and its own pair's posts (short:
+//!    at most 5 cases and a line or two of decisions), not the whole board.
+//!    An implementation is written to its registered API, so that its pair's
+//!    cases pass; the tests to its pair's API, with its own cases.
 //! 3. The tournament merge, the tests, and only the failing tasks back to one
 //!    minion each, as before.
 
@@ -108,9 +109,9 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
         .iter()
         .map(|p| {
             let prompt = if p.tests {
-                format!("You direct {} : the tests of task {} ({}: {}). Think of a few quick test cases with their exact expected answers (what goes in, what must come out), whatever the API will be. Reply with ONE JSON object: {{\"cases\":[\"<input -> exact expected output>\"],\"thoughts\":[\"<at most 2 short lines the others should know>\"]}}", p.path, p.task, p.title, p.spec)
+                format!("You direct {} : the tests of task {} ({}: {}). Think of a few quick test cases with their exact expected answers (what goes in, what must come out), whatever the API will be. Reply with ONE JSON object: {{\"cases\":[\"<input -> exact expected output: at most 5, short>\"],\"thoughts\":[\"<at most 1 short line>\"]}}", p.path, p.task, p.title, p.spec)
             } else {
-                format!("You direct {} : the implementation of task {} ({}: {}). Design its public API: every pub item with its exact Rust signature (module `tasks::{}`), small and lean. Reply with ONE JSON object: {{\"items\":[{{\"name\":\"{}::<item>\",\"kind\":\"fn|struct|enum|trait|const|type|impl\",\"signature\":\"<exact>\"}}],\"budget\":<the lines it needs, at most 130>,\"thoughts\":[\"<at most 3 short lines: its design decisions>\"]}}", p.path, p.task, p.title, p.spec, p.module, p.module)
+                format!("You direct {} : the implementation of task {} ({}: {}). Design its public API: every pub item with its exact Rust signature (module `tasks::{}`), small and lean. Reply with ONE JSON object: {{\"items\":[{{\"name\":\"{}::<item>\",\"kind\":\"fn|struct|enum|trait|const|type|impl\",\"signature\":\"<exact>\"}}],\"budget\":<the lines it needs, at most 130>,\"thoughts\":[\"<at most 2 short lines: its design decisions>\"]}}", p.path, p.task, p.title, p.spec, p.module, p.module)
             };
             ask(&format!("direct {}", p.path), prompt, Want::Json, "medium")
         })
@@ -142,19 +143,17 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
     }
     code::step(&mut steps, "direct (every minion, thinking together)", &mut t, &thinkers.iter().collect::<Vec<_>>());
 
-    // 2. build, all at once: everyone sees everyone's thinking
-    let registry: String = shared.items().iter().map(|i| format!("{} | {} | {}\n", i.file, i.name, i.signature)).collect();
-    let board: String = shared.board().iter().map(|(f, x)| format!("{} : {x}\n", f.trim_start_matches("direct "))).collect();
-    let build_file = run_dir.join("build.txt");
-    agent::write(&build_file, &format!(
-        "{rules}\n\nTHE WHOLE TASK:\n{}\n\nTHE BOX AFTER EVERYONE THOUGHT\nREGISTRY (file | item | signature): who builds what. Build your own items exactly; use the others only as registered; build nothing that is here already. A new shared helper: registry_claim it first.\n{registry}\nBOARD (who : thought or test case):\n{board}\n\
-HOW YOU BUILD: write only your own file, within its budget; never read or write another file. Reply with the file only: `=== FILE: <path> ===`, its whole content, `=== END ===`; before it you may give one line `=== NOTE: <what the others should know> ===`.",
-        o.task
-    ))?;
-    let setup = Setup { shared: Some(build_file), workdir: run_dir.clone(), read: Vec::new() };
-    let warm = Ask { want: Want::Text, ..ask("warm", "Reply with OK.".into(), Want::Text, "low")? };
-    let warmed = swarm::run("warm the shared cache", &setup, vec![warm], 1).pop().unwrap()?;
-    code::step(&mut steps, "warm the shared cache", &mut t, &[&warmed]);
+    // 2. build, all at once. The shared prefix stays the one already in the cache (the rules and the
+    // task); each minion gets only its slice of the Box: its own module's registered items and the
+    // posts of its own pair (not the whole board: the others' thoughts are not about its file)
+    let items = shared.items();
+    let posts = shared.board();
+    let slice_of = |module: &str| -> String {
+        let reg: String = items.iter().filter(|i| i.file == format!("src/{module}.rs")).map(|i| format!("  {}\n", i.signature)).collect();
+        let mine: String = posts.iter().filter(|(f, _)| f.ends_with(&format!("/{module}.rs"))).map(|(_, x)| format!("  {}\n", x.trim_start_matches(&format!("case for {module}: ")))).collect();
+        format!("THE BOX, your slice:\nregistered for src/{module}.rs:\n{reg}posts of your pair (cases: input -> exact output; and decisions):\n{mine}")
+    };
+    let slice_chars: usize = pieces.iter().map(|p| slice_of(&p.module).len()).sum();
     let wt = run_dir.join("wt");
     for i in 0..pieces.len() {
         code::git(&o.dir, &["worktree", "add", "-q", "-b", &format!("piece-{i:03}"), &wt.join(format!("{i:03}")).display().to_string(), "main"])?;
@@ -163,9 +162,9 @@ HOW YOU BUILD: write only your own file, within its budget; never read or write 
         .iter()
         .map(|p| {
             let prompt = if p.tests {
-                format!("Build {} : the tests of task {} (`tasks::{}`), through the API registered for src/{}.rs only, with the cases on the board for {}. At most 50 lines.", p.path, p.task, p.module, p.module, p.module)
+                format!("{}\nBuild {} : the tests of task {} (`tasks::{}`), through the registered API above only, with your pair's cases. At most 50 lines. Write only this file; reply with it only: `=== FILE: {} ===`, its whole content, `=== END ===`.", slice_of(&p.module), p.path, p.task, p.module, p.path)
             } else {
-                format!("Build {} : task {} ({}). Build exactly the items registered for it, so that the cases on the board for {} pass. At most {} lines; no tests in it (its pair writes them).", p.path, p.task, p.title, p.module, budget.get(&p.module).copied().unwrap_or(120))
+                format!("{}\nBuild {} : task {} ({}). Build exactly the items registered above, so that the cases pass. At most {} lines; no tests in it (its pair writes them). Write only this file; reply with it only: `=== FILE: {} ===`, its whole content, `=== END ===`.", slice_of(&p.module), p.path, p.task, p.title, budget.get(&p.module).copied().unwrap_or(120), p.path)
             };
             ask(&format!("build {}", p.path), prompt, Want::Files, "low")
         })
@@ -258,5 +257,5 @@ HOW YOU BUILD: write only your own file, within its budget; never read or write 
     let writing: f64 = steps.iter().filter(|s| !s.name.starts_with("test")).map(|s| s.seconds).sum();
     let testing: f64 = steps.iter().filter(|s| s.name.starts_with("test")).map(|s| s.seconds).sum();
     let _ = Value::Null;
-    Ok(code::finish(mode, steps, wall, result, run_dir, (writing, testing), &o.dir, vec![("merge time".into(), format!("{merge_s:.1} s"))]))
+    Ok(code::finish(mode, steps, wall, result, run_dir, (writing, testing), &o.dir, vec![("merge time".into(), format!("{merge_s:.1} s")), ("slices read in building".into(), format!("{slice_chars} chars in all ({} a minion)", slice_chars / pieces.len().max(1)))]))
 }

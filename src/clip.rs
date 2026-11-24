@@ -299,6 +299,7 @@ fn direct(d: &mut Decisions, v: &Value) {
 
 pub fn run(o: &Options) -> Result<Report, String> {
     let wall = Instant::now();
+    swarm::begin_run();
     let mode = if o.single { "single agent".to_string() } else { format!("swarm of {} agents", o.agents) };
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let dir = agent::home().join("runs").join(format!("{stamp}-{}", if o.single { "single" } else { "swarm" }));
