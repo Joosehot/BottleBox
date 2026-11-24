@@ -1,0 +1,12 @@
+Ten independent hard-math coding tasks in Rust (edition 2021, standard library only, no dependencies). Each task is its own module, with tests that check exact known answers. Build and test in release mode (`cargo test --release`); every test must pass.
+
+1. Segmented prime sieve up to 10^9, return the count (50847534).
+2. Radix-2 FFT and its inverse; verify the round-trip error is below 1e-9.
+3. Big-integer multiplication (Karatsuba); verify against the known factorial of 1000.
+4. LU decomposition with partial pivoting; solve Ax = b and check the residual.
+5. Dijkstra with a binary heap on a generated graph of 1,000,000 edges with a fixed seed.
+6. Deterministic Miller-Rabin primality test for u64; test known primes and composites.
+7. Modular exponentiation and modular inverse; verify an RSA round-trip.
+8. Fast Fibonacci by matrix exponentiation modulo 1e9+7; verify F(10^18).
+9. Gaussian elimination over GF(2); verify the rank of a fixed matrix.
+10. Simpson's rule numerical integration; verify that the integral of sin(x) from 0 to pi is 2 within 1e-10.

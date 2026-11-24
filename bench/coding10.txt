@@ -1,0 +1,12 @@
+Ten independent Rust modules: pure coding speed, simple logic. Rust, edition 2021, standard library only (no dependencies). Each module is about 200 to 300 lines with a few quick unit tests (each test runs in well under a second). Build and test with `cargo test --release`; every test must pass.
+
+1. CSV parser: fields, quoted fields with commas and escaped quotes, a header row, records as vectors of strings.
+2. INI config reader: sections, key = value pairs, comments, typed getters (string, integer, boolean) with defaults.
+3. Todo list CLI with add, remove and list: the commands parsed from arguments, the list kept in a plain text file.
+4. Simple tokenizer for math expressions: numbers (with decimals), identifiers, + - * / ^ ( ) and errors with positions.
+5. String utils: slugify, truncate (with an ellipsis, on character boundaries), and case conversion (snake, kebab, camel, Pascal).
+6. Date formatter: a date and time formatted by a pattern (YYYY, MM, DD, hh, mm, ss, month and weekday names), with leap years.
+7. In-memory key-value store with TTL: set, get, delete, expiry against a clock that tests can control.
+8. Markdown headings-to-TOC generator: ATX headings to a nested list of links with unique anchors; skip code blocks.
+9. Simple LRU cache: get, put, capacity, eviction of the least recently used entry.
+10. Log file filter by level and keyword: parse log lines (timestamp, level, message), filter by minimum level and keyword.

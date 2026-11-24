@@ -80,6 +80,9 @@ pub fn run(title: &str, setup: &Setup, asks: Vec<Ask>, n: usize) -> Vec<Result<A
     let slots = Arc::new((Mutex::new(n.max(1)), Condvar::new()));
     let results: Arc<Mutex<Vec<Option<Result<Answer, String>>>>> = Arc::new(Mutex::new(vec![None; asks.len()]));
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if !live {
+        println!("-- {title}: {} agents", asks.len());
+    }
     std::thread::scope(|scope| {
         // the board, redrawn five times a second
         let (b2, f2) = (board.clone(), finished.clone());
@@ -105,7 +108,14 @@ pub fn run(title: &str, setup: &Setup, asks: Vec<Ask>, n: usize) -> Vec<Result<A
                     *free -= 1;
                 }
                 board.lock().unwrap().rows[i].began = Some(Instant::now());
-                let set = |s: &str| board.lock().unwrap().rows[i].state = s.to_string();
+                // without a terminal (a log file), every change is a line
+                let set = |s: &str| {
+                    let mut b = board.lock().unwrap();
+                    if !live && b.rows[i].state != s {
+                        println!("[{:7.1} s] {} {s}", b.began.elapsed().as_secs_f64(), b.rows[i].id);
+                    }
+                    b.rows[i].state = s.to_string();
+                };
                 let r = agent::run(setup, ask, &set);
                 {
                     let mut b = board.lock().unwrap();
@@ -117,6 +127,10 @@ pub fn run(title: &str, setup: &Setup, asks: Vec<Ask>, n: usize) -> Vec<Result<A
                             row.tokens = a.usage.tokens();
                         }
                         Err(_) => row.state = "failed".into(),
+                    }
+                    let (id, state, secs, tokens) = (row.id.clone(), row.state.clone(), row.seconds.unwrap_or(0.0), row.tokens);
+                    if !live {
+                        println!("[{:7.1} s] {id} {state} in {secs:.1} s, {tokens} tokens", b.began.elapsed().as_secs_f64());
                     }
                 }
                 results.lock().unwrap()[i] = Some(r);
@@ -131,12 +145,6 @@ pub fn run(title: &str, setup: &Setup, asks: Vec<Ask>, n: usize) -> Vec<Result<A
         finished.store(true, std::sync::atomic::Ordering::Relaxed);
     });
     board.lock().unwrap().draw(live);
-    if !live {
-        let b = board.lock().unwrap();
-        for r in &b.rows {
-            println!("  {:<14} {:<8} {:>6.1} s  {} tokens", r.id, r.state, r.seconds.unwrap_or(0.0), r.tokens);
-        }
-    }
     let mut res = results.lock().unwrap();
     res.iter_mut().map(|r| r.take().unwrap_or_else(|| Err("not run".into()))).collect()
 }
