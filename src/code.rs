@@ -277,6 +277,7 @@ pub fn run(o: &Options) -> Result<Report, String> {
                 max_output: None,
                 first_token: None,
                 stock: true,
+                fork: false,
             });
         }
         let setup = Setup { shared: None, workdir: o.dir.clone(), read: Vec::new() };

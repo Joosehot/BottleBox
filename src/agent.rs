@@ -45,6 +45,12 @@ impl Usage {
         self.cache_read += o.cache_read;
         self.cost_usd += o.cost_usd;
     }
+    /// What the tokens cost at Claude Opus 5.5's API prices (per million: input $4, output $20,
+    /// cache read $0.20, cache write $8 for the 1-hour cache Claude Code writes). Claude Code's own
+    /// total_cost_usd counts a resumed session's earlier turns again, so it is not used for the total.
+    pub fn cost(&self) -> f64 {
+        (self.input as f64 * 4.0 + self.output as f64 * 20.0 + self.cache_read as f64 * 0.2 + self.cache_write as f64 * 8.0) / 1e6
+    }
     pub fn tokens(&self) -> u64 {
         self.input + self.output + self.cache_write + self.cache_read
     }
@@ -83,6 +89,8 @@ pub struct Ask {
     pub first_token: Option<Signal>,
     /// a stock Claude Code agent (the benchmark's baseline): see `STOCK`
     pub stock: bool,
+    /// with `resume`: go on from that session in a new one (its conversation is read from the cache)
+    pub fork: bool,
 }
 
 /// The baseline of every benchmark, FROZEN: a stock Claude Code agent on Claude Opus 5.5 with its
@@ -103,7 +111,7 @@ pub fn raise(s: &Signal) {
 
 impl Ask {
     pub fn minion(id: &str, prompt: String, model: &str, want: Want) -> Ask {
-        Ask { id: id.to_string(), prompt, model: model.to_string(), keep: false, resume: None, effort: Some("low".into()), want, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None, first_token: None, stock: false }
+        Ask { id: id.to_string(), prompt, model: model.to_string(), keep: false, resume: None, effort: Some("low".into()), want, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None, first_token: None, stock: false, fork: false }
     }
 }
 
@@ -235,6 +243,9 @@ pub fn run(setup: &Setup, ask: &Ask, status: &dyn Fn(&str)) -> Result<Answer, St
         }
         if let Some(s) = &ask.resume {
             c.args(["--resume", s]);
+            if ask.fork {
+                c.arg("--fork-session");
+            }
         }
         // an agent that works with its tools is read as a stream, so the time its cargo commands take can be told apart;
         // so is one whose first token is waited for (with the partial messages, which come as the model writes)

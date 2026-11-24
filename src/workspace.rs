@@ -81,6 +81,7 @@ You write the glue yourself: Cargo.toml and src/lib.rs (declaring every module).
         mcp: None,
         max_output: None, first_token: None,
         stock: false,
+        fork: false,
     };
     let plan_answer = swarm::run("think: the director writes the Box", &setup, vec![think], 1).pop().unwrap()?;
     let plan = plan_answer.json.clone();

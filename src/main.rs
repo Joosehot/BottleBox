@@ -28,7 +28,7 @@ mod workspace;
 fn print(r: &clip::Report) {
     println!("\n== {} ==", r.mode);
     println!("{:<40} {:>8} {:>6} {:>10} {:>9} {:>10} {:>10} {:>8} {:>8}", "step", "seconds", "agents", "tokens", "output", "thinking", "cache read", "waits s", "cost $");
-    let row = |name: &str, secs: f64, agents: usize, u: &agent::Usage, waited: f64| println!("{:<40} {:>8.1} {:>6} {:>10} {:>9} {:>10} {:>10} {:>8.1} {:>8.3}", name, secs, agents, u.tokens(), u.output, u.thinking, u.cache_read, waited, u.cost_usd);
+    let row = |name: &str, secs: f64, agents: usize, u: &agent::Usage, waited: f64| println!("{:<40} {:>8.1} {:>6} {:>10} {:>9} {:>10} {:>10} {:>8.1} {:>8.3}", name, secs, agents, u.tokens(), u.output, u.thinking, u.cache_read, waited, u.cost());
     for s in &r.steps {
         row(&s.name, s.seconds, s.agents, &s.usage, s.waited);
     }
@@ -79,9 +79,10 @@ fn compare(done: &[clip::Report]) {
     line("cache hit rate", &|r| format!("{:.1} %", 100.0 * r.usage.cache_read as f64 / (r.usage.input + r.usage.cache_write + r.usage.cache_read).max(1) as f64));
     line("  uncached input", &|r| r.usage.input.to_string());
     line("  written to cache", &|r| r.usage.cache_write.to_string());
-    // Claude Sonnet 5.5 per million tokens: input $2, output $10, cache read $0.20, cache write (1 hour) $4
-    line("cost from the tokens, $", &|r| format!("{:.3}", (r.usage.input as f64 * 2.0 + r.usage.output as f64 * 10.0 + r.usage.cache_read as f64 * 0.2 + r.usage.cache_write as f64 * 4.0) / 1e6));
-    line("cost at API prices, $", &|r| format!("{:.3}", r.usage.cost_usd));
+    // the cost from the tokens at Claude Opus 5.5's prices (Usage::cost); Claude Code's own figure beside it
+    // counts a resumed session's earlier turns again
+    line("cost from the tokens, $", &|r| format!("{:.3}", r.usage.cost()));
+    line("  Claude Code's total_cost_usd", &|r| format!("{:.3}", r.usage.cost_usd));
     line("result", &|r| r.result.split(" (").next().unwrap_or("").to_string());
 }
 

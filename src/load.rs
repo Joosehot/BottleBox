@@ -12,9 +12,16 @@
 //!    each section and one for the tests; at most 20 in all, only as many as
 //!    the work needs.
 //! 3. **Streaming**: a task's minions start as soon as its director is done,
-//!    not when every director is; the shared prefix is the cached one (the
-//!    first agent starts alone, the others at its first token).
-//! 4. Each task is tested on its own as soon as its files are written; a
+//!    not when every director is.
+//! 4. **The cache, as a stock agent uses it**: Claude Code sets the cache
+//!    breakpoints itself (after the system prompt, after the last message),
+//!    so conversations are reused, never rebuilt: one warm session holds the
+//!    shared prefix; every director goes on from it (`--resume
+//!    --fork-session`), every builder from its director, a fix from its
+//!    builder, each reading the conversation before it from the cache and
+//!    writing only what it adds. One effort for all (a change would empty the
+//!    cache).
+//! 5. Each task is tested on its own as soon as its files are written; a
 //!    failing task goes with its error to one minion (it owns that task's
 //!    files), and blocks nothing else. Then the tournament merge and the
 //!    tests of the whole crate.
@@ -37,6 +44,8 @@ const SMALL: u64 = 70;
 /// above this many lines an implementation is split into sections
 const BIG: u64 = 150;
 const TRIES: usize = 3;
+/// one effort for every agent: a change of effort in a conversation would empty its cache
+const EFFORT: &str = "low";
 
 struct Task {
     n: usize,
@@ -142,20 +151,24 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
     let mut waits: Vec<f64> = Vec::new();
     let mut thinking_s = 0.0;
     let mut pending = 0usize;
-    let warm = agent::Signal::default();
+    // the cache warmed once: a session holding the shared prefix, which every director goes on from
+    // (`--resume --fork-session`: its whole conversation is read from the cache, as a stock agent's turn
+    // reads the one before). One effort for every agent: a change of effort would empty the cache.
+    let warm = Ask { keep: true, ..ask("warm", "You are one of the hive's directors. Your task comes in the next message. Reply with OK.".into(), Want::Text, EFFORT) };
+    let warmed = agent::run(&setup, &warm, &|_| {})?;
+    say("the shared prefix is cached in a session: the directors go on from it".into(), &mut log);
+    let warm_session = warmed.session.clone();
+    let mut sessions: BTreeMap<(usize, usize), String> = BTreeMap::new();
 
     std::thread::scope(|s| -> Result<(), String> {
-        // 1. think together: one director a task, all at once (the first alone until its first token)
+        // 1. think together: one director a task, all at once
         for (k, task) in tasks.iter().enumerate() {
             let prompt = format!(
                 "You direct task {} ({}: {}), module `tasks::{}`. Think it through once and decide it whole, for the minions who will build it: its public API (every pub item with its exact Rust signature), its conventions (names, formats, error values), a few test cases with exact answers written as calls of exactly that API, and the size of its implementation. If the implementation needs more than about {BIG} lines, split it into 2 or 3 sections, each a separate set of its items (the types and constants in the first). Reply with ONE JSON object: \
 {{\"items\":[{{\"name\":\"{}::<item>\",\"kind\":\"fn|struct|enum|trait|const|type|impl\",\"signature\":\"<exact>\"}}],\"conventions\":\"<at most 3 short lines>\",\"cases\":[\"<a call of the API -> its exact result: at most 5>\"],\"lines\":<the implementation's lines>,\"sections\":[{{\"items\":[\"<item names>\"],\"lines\":<lines>}}]}}",
                 task.n, task.title, task.spec, task.module, task.module
             );
-            let mut a = ask(&format!("direct task {}", task.n), prompt, Want::Json, "medium");
-            if k == 0 {
-                a.first_token = Some(warm.clone());
-            }
+            let a = Ask { keep: true, resume: Some(warm_session.clone()), fork: true, ..ask(&format!("direct task {}", task.n), prompt, Want::Json, EFFORT) };
             let tx = tx.clone();
             let setup = &setup;
             let t0 = now();
@@ -164,12 +177,6 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                 let _ = tx.send(Event::Directed(k, r, t0));
             });
             pending += 1;
-            if k == 0 {
-                let (lock, cv) = &*warm;
-                let up = lock.lock().unwrap();
-                let _ = cv.wait_timeout_while(up, std::time::Duration::from_secs(30), |up| !*up).unwrap();
-                say("the shared prefix is cached: the other directors start".into(), &mut log);
-            }
         }
 
         let test_task = |k: usize, tx: mpsc::Sender<Event>| {
@@ -224,15 +231,12 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                     say(format!("task {} directed: about {lines} lines -> {} minion(s): {}", task.n, mine.len(), mine.iter().map(|p| p.kind.clone()).collect::<Vec<_>>().join(", ")), &mut log);
                     plans.insert(k, plan.clone());
                     pieces.insert(k, mine.clone());
+                    let director_session = a.session.clone();
                     thinkers.push(a);
                     thinking_s = now();
                     // 3. streaming: its minions start now
-                    let reg: String = shared.items().iter().filter(|i| i.file == src(&task.module)).map(|i| format!("  {}\n", i.signature)).collect();
-                    let slice = format!(
-                        "THE BOX, task {} ({}): module `tasks::{}`\nregistered API:\n{reg}conventions: {}\ncases:\n{}",
-                        task.n, task.title, task.module, plan["conventions"].as_str().unwrap_or(""),
-                        plan["cases"].as_array().into_iter().flatten().filter_map(|c| c.as_str()).map(|c| format!("  {c}\n")).collect::<String>()
-                    );
+                    // its minions go on from the director's own conversation (read from the cache): the plan is the reply above
+                    let slice = format!("Your plan above for task {} (module `tasks::{}`) is binding: build to exactly its API, conventions and cases.", task.n, task.module);
                     for (j, p) in mine.iter().enumerate() {
                         let prompt = match p.kind.as_str() {
                             "whole" => format!("{slice}\nBuild both files of this task: {} (exactly the registered API; no tests in it) and {} (a few quick tests with the cases, `use tasks::{}::*;`). At most {} lines and 50 lines. Reply with the two files: each a line `=== FILE: <path> ===` and its whole content, the last ended by `=== END ===`.", src(&task.module), tst(&task.module), task.module, p.lines.max(60), ),
@@ -240,7 +244,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                             _ if p.sections == 1 => format!("{slice}\nBuild {} : exactly the registered API, so that the cases pass; no tests in it (another minion writes them). At most {} lines. Reply with the file only: `=== FILE: {} ===`, its whole content, `=== END ===`.", src(&task.module), p.lines.max(60), src(&task.module)),
                             _ => format!("{slice}\nBuild section {} of {} of {} : the code of only these items: {}. The other sections are written at the same time by other minions; use their items by name, do not write them. Put the `use` lines it needs at its top. At most {} lines. Reply with your section only: `=== FILE: {}#{} ===`, its content, `=== END ===`.", p.section + 1, p.sections, src(&task.module), p.items.join(", "), p.lines.max(40), src(&task.module), p.section + 1),
                         };
-                        let a = ask(&format!("build task {} {}", task.n, p.kind), prompt, Want::Files, "low");
+                        let a = Ask { keep: true, resume: Some(director_session.clone()), fork: true, ..ask(&format!("build task {} {}", task.n, p.kind), prompt, Want::Files, EFFORT) };
                         let tx = tx.clone();
                         let setup = &setup;
                         let ready = now();
@@ -282,6 +286,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                             }
                         }
                     }
+                    sessions.insert((k, j), a.session.clone());
                     builders.push(a);
                     if files.get(&k).is_some_and(|f| f.contains_key(&src(&task.module)) && f.contains_key(&tst(&task.module))) && !passed.contains_key(&k) && tries.get(&k).is_none() {
                         tries.insert(k, 0);
@@ -310,7 +315,8 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                     // back to one minion, with only its task's files: nothing else waits
                     let current = code::bundle(&run_dir.join("check").join(&task.module), &owned);
                     let prompt = format!("You own {} (task {}) and only them. The build or its tests fail:\n{error}\n\nThe files now:\n{current}\nFix them, keeping the registered API. Do not change an expected answer to match the output unless you are sure it was wrong. Reply with the files you changed, each as `=== FILE: <path> ===` and its whole content, the last ended by `=== END ===`.", owned.join(", "), task.n);
-                    let a = ask(&format!("fix task {}", task.n), prompt, Want::Files, "low");
+                    // the fix goes on from the conversation of the task's first builder (read from the cache)
+                    let a = Ask { keep: true, resume: sessions.get(&(k, 0)).cloned(), fork: sessions.contains_key(&(k, 0)), ..ask(&format!("fix task {}", task.n), prompt, Want::Files, EFFORT) };
                     shared.post("hive", &format!("task {} back to one minion to fix", task.n))?;
                     let tx = tx.clone();
                     let setup = &setup;
