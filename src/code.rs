@@ -39,6 +39,8 @@ pub enum How {
     Swarm { per_task: usize, merge_minions: bool },
     /// no director: every minion directs its own piece, all thinking together in the Box (hive.rs)
     Hive,
+    /// one director a task thinking together, minions by workload, a streaming plan (load.rs)
+    Load,
 }
 
 pub struct Options {
@@ -243,6 +245,7 @@ pub fn run(o: &Options) -> Result<Report, String> {
         How::Baseline(k) => (format!("{k} Claude Code agents in parallel"), format!("baseline{k}")),
         How::Swarm { per_task, .. } => (format!("Bottle Box, {per_task} minion file(s) a task"), format!("swarm{per_task}")),
         How::Hive => ("Bottle Box hive, every minion a director".to_string(), "hive".to_string()),
+        How::Load => ("Bottle Box, minions by workload".to_string(), "load".to_string()),
     };
     let run_dir = agent::home().join("runs").join(format!("{stamp}-code-{tag}"));
     std::fs::create_dir_all(&run_dir).map_err(|e| e.to_string())?;
@@ -299,6 +302,9 @@ pub fn run(o: &Options) -> Result<Report, String> {
     }
     if let How::Hive = o.how {
         return crate::hive::run(o, mode, run_dir, wall);
+    }
+    if let How::Load = o.how {
+        return crate::load::run(o, mode, run_dir, wall);
     }
     let How::Swarm { per_task, merge_minions } = o.how else { unreachable!() };
     crate::workspace::run(o, per_task, merge_minions, mode, run_dir, wall)

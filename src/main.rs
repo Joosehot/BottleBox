@@ -19,8 +19,8 @@ mod nimbus;
 mod agent;
 mod clip;
 mod code;
-mod foreman;
 mod hive;
+mod load;
 mod shared;
 mod swarm;
 mod workspace;
@@ -64,7 +64,7 @@ fn compare(done: &[clip::Report]) {
     };
     line("wall time, s", &|r| format!("{:.1}", r.wall));
     line("speedup", &|r| format!("{:.2}x", base.wall / r.wall.max(0.1)));
-    for key in ["planning time", "build time", "reassignments", "Foreman tokens", "lines of code", "duplicated code", "merge time"] {
+    for key in ["thinking time", "build time", "minions used", "idle", "lines of code", "duplicated code", "merge time"] {
         line(key, &|r| r.extra.iter().find(|(k, _)| k == key).map_or("-".into(), |(_, v)| v.split(' ').take(2).collect::<Vec<_>>().join(" ")));
     }
     line("writing, s", &|r| r.split.map_or("-".into(), |s| format!("{:.1}", s.0)));
@@ -133,7 +133,7 @@ fn main() {
             let agents = num("--agents", "20") as usize;
             let runs: Vec<(code::How, &str)> = if flag("--bench") {
                 // the ratio rule: 20 minions against 5 Claude Code agents (and with --third, 10 minions, one a task)
-                let mut v = vec![(if flag("--director") { code::How::Swarm { per_task: 2, merge_minions: false } } else { code::How::Hive }, "swarm20"), (code::How::Baseline(5), "baseline5")];
+                let mut v = vec![(if flag("--director") { code::How::Swarm { per_task: 2, merge_minions: false } } else if flag("--hive") { code::How::Hive } else { code::How::Load }, "swarm20"), (code::How::Baseline(5), "baseline5")];
                 if flag("--third") {
                     v.push((code::How::Swarm { per_task: 1, merge_minions: false }, "swarm10"));
                 }

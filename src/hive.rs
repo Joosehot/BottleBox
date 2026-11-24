@@ -39,7 +39,7 @@ struct Piece {
 }
 
 /// "1. CSV parser: fields, ..." as (the module's name, its title, its spec).
-fn module_of(item: &str) -> (String, String, String) {
+pub(crate) fn module_of(item: &str) -> (String, String, String) {
     let body = item.split_once(". ").map_or(item, |(_, b)| b);
     let (title, spec) = body.split_once(':').map_or((body, ""), |(t, s)| (t, s));
     let mut m = String::new();
@@ -141,7 +141,6 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
         }
         thinkers.push(a);
     }
-    let planning_s = t.elapsed().as_secs_f64();
     code::step(&mut steps, "direct (every minion, thinking together)", &mut t, &thinkers.iter().collect::<Vec<_>>());
 
     // 2. build, all at once. The shared prefix stays the one already in the cache (the rules and the
@@ -170,36 +169,23 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
             ask(&format!("build {}", p.path), prompt, Want::Files, "low")
         })
         .collect::<Result<_, _>>()?;
-    // the building runs as events, orchestrated by the Foreman (a 21st minion, no code of its own)
-    let fpieces: Vec<crate::foreman::Piece> = pieces.iter().map(|p| crate::foreman::Piece { task: p.task, module: p.module.clone(), path: p.path.clone() }).collect();
-    let make = |id: &str, prompt: String, want: Want, cap: Option<u32>| -> Result<Ask, String> {
-        let mut a = ask(id, prompt, want, "low")?;
-        if cap.is_some() {
-            a.max_output = cap;
+    let built = swarm::run(&format!("build: {} minions", asks.len()), &setup, asks, o.agents);
+    let mut builders: Vec<Answer> = Vec::new();
+    for (i, (r, p)) in built.into_iter().zip(&pieces).enumerate() {
+        let a = r?;
+        let (text, said) = notes(&a.text);
+        for n in said {
+            shared.post(&a.id, &n)?;
         }
-        Ok(a)
-    };
-    let cargo_toml = std::fs::read_to_string(o.dir.join("Cargo.toml")).map_err(|e| e.to_string())?;
-    let built = crate::foreman::build(&setup, asks, &fpieces, &run_dir, &wt, &cargo_toml, &shared, &make)?;
-    for (i, p) in pieces.iter().enumerate() {
-        code::commit(&wt.join(format!("{i:03}")), &format!("{}, by its minion", p.path))?;
+        let got = agent::files_in(&text);
+        let content = got.get(&p.path).cloned().or_else(|| (got.len() == 1).then(|| got.values().next().cloned()).flatten()).ok_or(format!("{}: its minion gave another file", p.path))?;
+        let at = wt.join(format!("{i:03}"));
+        agent::write(&at.join(&p.path), &content)?;
+        code::commit(&at, &format!("{}, by its minion", p.path))?;
+        builders.push(a);
     }
-    let build_s = t.elapsed().as_secs_f64();
-    let all: Vec<&Answer> = built.builders.iter().chain(&built.fixers).chain(&built.foreman).collect();
-    code::step(&mut steps, "build (builders, Foreman, early fixes)", &mut t, &all);
-    // every minion's own numbers, kept
-    for a in thinkers.iter().chain(all.iter().copied()) {
-        agent::write(&run_dir.join("pieces").join(format!("{}.json", a.id.replace(['/', ' ', '.'], "_"))), &serde_json::to_string_pretty(a).unwrap())?;
-    }
-    let mut foreman_usage = crate::agent::Usage::default();
-    built.foreman.iter().for_each(|a| foreman_usage.add(&a.usage));
-    let idle: Vec<f64> = built.idle.iter().map(|x| x.1).collect();
-    let idle_text = format!(
-        "mean {:.1} s, most {:.1} s ({})",
-        idle.iter().sum::<f64>() / idle.len().max(1) as f64,
-        idle.iter().cloned().fold(0.0, f64::max),
-        built.idle.iter().map(|(m, s)| format!("{m} {s:.1}")).collect::<Vec<_>>().join(", ")
-    );
+    code::step(&mut steps, "build (every minion its file)", &mut t, &builders.iter().collect::<Vec<_>>());
+
     // 3. the tournament merge
     let mut groups: Vec<usize> = (0..pieces.len()).collect();
     let mut rounds = 0;
@@ -271,5 +257,5 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
     let writing: f64 = steps.iter().filter(|s| !s.name.starts_with("test")).map(|s| s.seconds).sum();
     let testing: f64 = steps.iter().filter(|s| s.name.starts_with("test")).map(|s| s.seconds).sum();
     let _ = Value::Null;
-    Ok(code::finish(mode, steps, wall, result, run_dir, (writing, testing), &o.dir, vec![("planning time".into(), format!("{planning_s:.1} s")), ("build time".into(), format!("{build_s:.1} s")), ("reassignments".into(), built.reassignments.to_string()), ("Foreman tokens".into(), format!("{} (${:.3})", foreman_usage.tokens(), foreman_usage.cost_usd)), ("idle per minion".into(), idle_text), ("first minion starts".into(), format!("{:.1} s into the build", built.first_start)), ("merge time".into(), format!("{merge_s:.1} s")), ("slices read in building".into(), format!("{slice_chars} chars in all ({} a minion)", slice_chars / pieces.len().max(1)))]))
+    Ok(code::finish(mode, steps, wall, result, run_dir, (writing, testing), &o.dir, vec![("merge time".into(), format!("{merge_s:.1} s")), ("slices read in building".into(), format!("{slice_chars} chars in all ({} a minion)", slice_chars / pieces.len().max(1)))]))
 }
