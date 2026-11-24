@@ -1,0 +1,19 @@
+[package]
+name = "bottlebox"
+version = "0.1.0"
+edition = "2021"
+description = "Bottle Box: one task split across many small Claude agents at once, sharing one context; first drives Bottle Clip"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+crossterm = "0.28"
+# for Strike's fstrike.rs (Nimbus; its crate fetches are not used here)
+toml = "0.8"
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
+debug = 0
