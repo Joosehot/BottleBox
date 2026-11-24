@@ -22,4 +22,9 @@ with the task on stdin:
 - `--output-format stream-json --verbose`: only the form of the output, so
   that its tokens and the time of its cargo commands can be read.
 
+Every agent, the baseline's included, runs without `ANTHROPIC_API_KEY` and
+`ANTHROPIC_AUTH_TOKEN` in its environment, so it always runs on the owner's
+Claude subscription and never on an API key. That changes only who is
+billed, not how the agent works.
+
 Do not change this setup.

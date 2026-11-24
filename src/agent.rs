@@ -195,6 +195,9 @@ pub fn run(setup: &Setup, ask: &Ask, status: &dyn Fn(&str)) -> Result<Answer, St
         status("running");
         let mut c = Command::new("claude");
         c.current_dir(ask.workdir.as_ref().unwrap_or(&setup.workdir));
+        // every agent (the baseline's too) runs on the owner's Claude subscription, never on an API key
+        // that the environment may hold: that changes only who is billed, not how the agent works
+        c.env_remove("ANTHROPIC_API_KEY").env_remove("ANTHROPIC_AUTH_TOKEN");
         if ask.stock {
             // the frozen baseline: STOCK and nothing else
             c.args(STOCK);
