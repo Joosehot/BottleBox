@@ -19,7 +19,9 @@ mod nimbus;
 mod agent;
 mod clip;
 mod code;
+mod shared;
 mod swarm;
+mod workspace;
 
 fn print(r: &clip::Report) {
     println!("\n== {} ==", r.mode);
@@ -30,6 +32,9 @@ fn print(r: &clip::Report) {
     }
     row("total", r.wall, r.agents, &r.usage, r.steps.iter().map(|s| s.waited).sum());
     println!("tokens: {} in, {} out ({} of it thinking), {} written to the cache, {} read from it", r.usage.input, r.usage.output, r.usage.thinking, r.usage.cache_write, r.usage.cache_read);
+    for (k, v) in &r.extra {
+        println!("{k}: {v}");
+    }
     println!("result: {}\nrun: {}", r.result, r.dir.display());
     let line = format!("{}  {}  wall {:.1} s  agents {}  tokens {}  cost ${:.3}  {}\n", r.dir.file_name().unwrap().to_string_lossy(), r.mode, r.wall, r.agents, r.usage.tokens(), r.usage.cost_usd, r.result);
     let log = agent::home().join("usage.log");
@@ -57,6 +62,9 @@ fn compare(done: &[clip::Report]) {
     };
     line("wall time, s", &|r| format!("{:.1}", r.wall));
     line("speedup", &|r| format!("{:.2}x", base.wall / r.wall.max(0.1)));
+    for key in ["lines of code", "duplicated code", "merge time"] {
+        line(key, &|r| r.extra.iter().find(|(k, _)| k == key).map_or("-".into(), |(_, v)| v.split(' ').take(2).collect::<Vec<_>>().join(" ")));
+    }
     line("writing, s", &|r| r.split.map_or("-".into(), |s| format!("{:.1}", s.0)));
     line("testing, s", &|r| r.split.map_or("-".into(), |s| format!("{:.1}", s.1)));
     line("slowest step", &|r| r.steps.iter().max_by(|a, b| a.seconds.total_cmp(&b.seconds)).map_or(String::new(), |s| format!("{} {:.0}s", s.name.split(' ').next().unwrap_or(""), s.seconds)));
@@ -84,6 +92,19 @@ fn main() {
     };
     let mut done = Vec::new();
     match args.first().map(String::as_str) {
+        Some("box-mcp") => {
+            // the Box's tools for one agent (started by Claude Code from the agent's MCP config)
+            let dir = std::path::PathBuf::from(value("--box", ""));
+            shared::serve(&dir, &value("--as", "minion")).unwrap_or_else(|e| fail(e));
+            return;
+        }
+        Some("measure") => {
+            // the code under a folder: its lines and how much of it is duplicated
+            let dir = std::path::PathBuf::from(args.get(1).cloned().unwrap_or_default());
+            let (lines, code, dup) = code::measure(&dir);
+            println!("{}: {lines} lines; {dup} of {code} code lines duplicated ({:.1} %)", dir.display(), 100.0 * dup as f64 / code.max(1) as f64);
+            return;
+        }
         Some("clip") => {
             let Some(url) = args.get(1) else { fail(usage.into()) };
             let runs: Vec<bool> = if flag("--compare") { vec![false, true] } else { vec![flag("--single")] };

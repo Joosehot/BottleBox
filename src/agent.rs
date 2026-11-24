@@ -75,11 +75,14 @@ pub struct Ask {
     pub allow: Vec<String>,
     /// where it runs (None: the setup's folder)
     pub workdir: Option<PathBuf>,
+    /// an MCP config file (the Box's tools), and the most output tokens a turn may give
+    pub mcp: Option<PathBuf>,
+    pub max_output: Option<u32>,
 }
 
 impl Ask {
     pub fn minion(id: &str, prompt: String, model: &str, want: Want) -> Ask {
-        Ask { id: id.to_string(), prompt, model: model.to_string(), keep: false, resume: None, effort: Some("low".into()), want, tools: "Read".into(), allow: Vec::new(), workdir: None }
+        Ask { id: id.to_string(), prompt, model: model.to_string(), keep: false, resume: None, effort: Some("low".into()), want, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None }
     }
 }
 
@@ -179,6 +182,13 @@ pub fn run(setup: &Setup, ask: &Ask, status: &dyn Fn(&str)) -> Result<Answer, St
         c.args(["--tools", &ask.tools]);
         let mut allowed: Vec<String> = ask.tools.split(',').filter(|t| !t.is_empty()).map(String::from).collect();
         allowed.extend(ask.allow.iter().cloned());
+        if let Some(m) = &ask.mcp {
+            c.arg("--mcp-config").arg(m);
+            allowed.push("mcp__box".into());
+        }
+        if let Some(n) = ask.max_output {
+            c.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", n.to_string());
+        }
         if !allowed.is_empty() {
             c.arg("--allowedTools").arg(allowed.join(","));
         }
