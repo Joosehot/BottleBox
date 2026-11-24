@@ -3,6 +3,7 @@ name = "bottlebox"
 version = "0.1.0"
 edition = "2021"
 description = "Bottle Box: one task split across many small Claude agents at once, sharing one context; first drives Bottle Clip"
+license = "MIT"
 publish = false
 
 [dependencies]
