@@ -78,11 +78,22 @@ pub struct Ask {
     /// an MCP config file (the Box's tools), and the most output tokens a turn may give
     pub mcp: Option<PathBuf>,
     pub max_output: Option<u32>,
+    /// told when the model's first token comes (its prompt is in the cache by then): the swarm
+    /// starts the other agents only after the first one's prompt has written the cache
+    pub first_token: Option<Signal>,
+}
+
+/// A flag one thread raises and others wait for.
+pub type Signal = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
+pub fn raise(s: &Signal) {
+    *s.0.lock().unwrap() = true;
+    s.1.notify_all();
 }
 
 impl Ask {
     pub fn minion(id: &str, prompt: String, model: &str, want: Want) -> Ask {
-        Ask { id: id.to_string(), prompt, model: model.to_string(), keep: false, resume: None, effort: Some("low".into()), want, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None }
+        Ask { id: id.to_string(), prompt, model: model.to_string(), keep: false, resume: None, effort: Some("low".into()), want, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None, first_token: None }
     }
 }
 
@@ -204,11 +215,15 @@ pub fn run(setup: &Setup, ask: &Ask, status: &dyn Fn(&str)) -> Result<Answer, St
         if let Some(s) = &ask.resume {
             c.args(["--resume", s]);
         }
-        // an agent that works with its tools is read as a stream, so the time its cargo commands take can be told apart
-        let streamed = ask.want == Want::Text && !ask.tools.is_empty();
+        // an agent that works with its tools is read as a stream, so the time its cargo commands take can be told apart;
+        // so is one whose first token is waited for (with the partial messages, which come as the model writes)
+        let streamed = (ask.want == Want::Text && !ask.tools.is_empty()) || ask.first_token.is_some();
         c.args(["--output-format", if streamed { "stream-json" } else { "json" }]);
         if streamed {
             c.arg("--verbose");
+        }
+        if ask.first_token.is_some() {
+            c.arg("--include-partial-messages");
         }
         let mut child = c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("claude: {e}"))?;
         child.stdin.take().unwrap().write_all(prompt.as_bytes()).map_err(|e| e.to_string())?;
@@ -219,6 +234,11 @@ pub fn run(setup: &Setup, ask: &Ask, status: &dyn Fn(&str)) -> Result<Answer, St
             let mut last = Vec::new();
             for line in reader.lines().map_while(Result::ok) {
                 let Ok(e) = serde_json::from_str::<Value>(&line) else { continue };
+                if e["type"] == "stream_event" {
+                    if let Some(s) = &ask.first_token {
+                        raise(s);
+                    }
+                }
                 for part in e["message"]["content"].as_array().into_iter().flatten() {
                     if part["type"] == "tool_use" && part["input"]["command"].as_str().is_some_and(|c| c.contains("cargo")) {
                         started.insert(part["id"].as_str().unwrap_or("").to_string(), Instant::now());
@@ -238,6 +258,10 @@ pub fn run(setup: &Setup, ask: &Ask, status: &dyn Fn(&str)) -> Result<Answer, St
             Vec::new()
         };
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        // whatever came, nobody waits for this agent's first token any longer
+        if let Some(s) = &ask.first_token {
+            raise(s);
+        }
         let stdout = if streamed { stdout_bytes } else { out.stdout.clone() };
         let v: Value = match serde_json::from_slice(&stdout) {
             Ok(v) => v,

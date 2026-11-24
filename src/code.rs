@@ -270,7 +270,7 @@ pub fn run(o: &Options) -> Result<Report, String> {
                 allow: vec!["Bash(cargo:*)".into(), "Bash(git:*)".into(), "Bash(ls:*)".into(), "Bash(mkdir:*)".into()],
                 workdir: Some(d),
                 mcp: None,
-                max_output: None,
+                max_output: None, first_token: None,
             });
         }
         let setup = Setup { shared: None, workdir: o.dir.clone(), read: Vec::new() };

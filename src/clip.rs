@@ -339,7 +339,7 @@ pub fn run(o: &Options) -> Result<Report, String> {
     if o.single {
         let all_text: String = all.iter().map(|(id, p)| format!("[{id}] {}\n", p.trim_start_matches("Your piece: "))).collect();
         let prompt = format!("You do every piece of this task yourself, one after another. The pieces:\n{all_text}\nReply with ONE JSON object whose keys are the piece ids above and whose values are each piece's reply object.");
-        let ask = Ask { id: "single".into(), prompt, model: o.model.clone(), keep: true, resume: None, effort: None, want: Want::Json, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None };
+        let ask = Ask { id: "single".into(), prompt, model: o.model.clone(), keep: true, resume: None, effort: None, want: Want::Json, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None, first_token: None };
         let r = swarm::run("one agent, every piece", &setup, vec![ask], 1).pop().unwrap()?;
         for (id, _) in &all {
             if let Some(v) = r.json.get(id) {
@@ -349,7 +349,7 @@ pub fn run(o: &Options) -> Result<Report, String> {
         single_session = Some(r.session.clone());
         answers.push(r);
     } else {
-        let asks: Vec<Ask> = all.iter().map(|(id, p)| Ask { id: id.clone(), prompt: p.clone(), model: o.model.clone(), keep: false, resume: None, effort: None, want: Want::Json, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None }).collect();
+        let asks: Vec<Ask> = all.iter().map(|(id, p)| Ask { id: id.clone(), prompt: p.clone(), model: o.model.clone(), keep: false, resume: None, effort: None, want: Want::Json, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None, first_token: None }).collect();
         for (r, (id, _)) in swarm::run(&format!("swarm: {} pieces, {} at once", asks.len(), o.agents), &setup, asks, o.agents).into_iter().zip(&all) {
             match r {
                 Ok(a) => {
@@ -401,7 +401,7 @@ pub fn run(o: &Options) -> Result<Report, String> {
         allow: Vec::new(),
         workdir: None,
         mcp: None,
-        max_output: None,
+        max_output: None, first_token: None,
     };
     let mut director_usage = Usage::default();
     let mut agents_used = answers.len();
@@ -420,7 +420,7 @@ pub fn run(o: &Options) -> Result<Report, String> {
             .iter()
             .map(|(id, note)| {
                 let p = &all.iter().find(|(x, _)| x == id).unwrap().1;
-                Ask { id: id.clone(), prompt: format!("{p}\nThe director sent this piece back: {note}"), model: o.model.clone(), keep: false, resume: if o.single { single_session.clone() } else { None }, effort: None, want: Want::Json, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None }
+                Ask { id: id.clone(), prompt: format!("{p}\nThe director sent this piece back: {note}"), model: o.model.clone(), keep: false, resume: if o.single { single_session.clone() } else { None }, effort: None, want: Want::Json, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None, first_token: None }
             })
             .collect();
         let mut u = Usage::default();

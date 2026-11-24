@@ -19,6 +19,7 @@ mod nimbus;
 mod agent;
 mod clip;
 mod code;
+mod foreman;
 mod hive;
 mod shared;
 mod swarm;
@@ -63,7 +64,7 @@ fn compare(done: &[clip::Report]) {
     };
     line("wall time, s", &|r| format!("{:.1}", r.wall));
     line("speedup", &|r| format!("{:.2}x", base.wall / r.wall.max(0.1)));
-    for key in ["lines of code", "duplicated code", "merge time"] {
+    for key in ["planning time", "build time", "reassignments", "Foreman tokens", "lines of code", "duplicated code", "merge time"] {
         line(key, &|r| r.extra.iter().find(|(k, _)| k == key).map_or("-".into(), |(_, v)| v.split(' ').take(2).collect::<Vec<_>>().join(" ")));
     }
     line("writing, s", &|r| r.split.map_or("-".into(), |s| format!("{:.1}", s.0)));
@@ -74,6 +75,12 @@ fn compare(done: &[clip::Report]) {
     line("  output (thinking)", &|r| format!("{} ({})", r.usage.output, r.usage.thinking));
     line("  read from cache", &|r| r.usage.cache_read.to_string());
     line("rate-limit waits, s", &|r| format!("{:.1}", r.steps.iter().map(|s| s.waited).sum::<f64>()));
+    // the cache: what was read from it, of all the input (read + written + uncached)
+    line("cache hit rate", &|r| format!("{:.1} %", 100.0 * r.usage.cache_read as f64 / (r.usage.input + r.usage.cache_write + r.usage.cache_read).max(1) as f64));
+    line("  uncached input", &|r| r.usage.input.to_string());
+    line("  written to cache", &|r| r.usage.cache_write.to_string());
+    // Claude Sonnet 5.5 per million tokens: input $2, output $10, cache read $0.20, cache write (1 hour) $4
+    line("cost from the tokens, $", &|r| format!("{:.3}", (r.usage.input as f64 * 2.0 + r.usage.output as f64 * 10.0 + r.usage.cache_read as f64 * 0.2 + r.usage.cache_write as f64 * 4.0) / 1e6));
     line("cost at API prices, $", &|r| format!("{:.3}", r.usage.cost_usd));
     line("result", &|r| r.result.split(" (").next().unwrap_or("").to_string());
 }

@@ -1,9 +1,9 @@
 //! The swarm: many agents at once, at most N running, the rest queued; a
 //! live board in the terminal (running, done, waiting, each piece's time).
 //!
-//! The first agent is started alone and the others a few seconds later, so
-//! that the shared context is in the prompt cache before they ask: then
-//! they read it from there instead of each writing it again.
+//! The first agent is started alone, and the others when its first token
+//! has come: by then its prompt (the shared prefix) is in the prompt cache,
+//! so they read it from there instead of each writing it again.
 
 use crate::agent::{self, Answer, Ask, Setup};
 use crossterm::{cursor, terminal, QueueableCommand};
@@ -23,8 +23,8 @@ fn run_s() -> f64 {
     RUN.lock().unwrap().map_or(0.0, |t| t.elapsed().as_secs_f64())
 }
 
-/// How long the first agent runs alone before the rest start (seconds).
-const WARM: f64 = 3.0;
+/// The longest the others wait for the first agent's first token (seconds).
+const WARM_AT_MOST: f64 = 30.0;
 
 #[derive(Clone)]
 struct Row {
@@ -85,7 +85,13 @@ impl Board {
 
 /// Runs every ask, at most `n` at once. Returns the answers in the asks' order
 /// (an agent that failed for good is an Err in its place).
-pub fn run(title: &str, setup: &Setup, asks: Vec<Ask>, n: usize) -> Vec<Result<Answer, String>> {
+pub fn run(title: &str, setup: &Setup, mut asks: Vec<Ask>, n: usize) -> Vec<Result<Answer, String>> {
+    // the first agent warms the cache: the others start when its first token has come
+    // (only where they share a prefix: ordinary Claude Code agents each start at once)
+    let warm: Option<agent::Signal> = (asks.len() > 1 && setup.shared.is_some()).then(|| Arc::new((Mutex::new(false), Condvar::new())));
+    if let Some(w) = &warm {
+        asks[0].first_token = Some(w.clone());
+    }
     let live = std::io::stdout().is_terminal();
     let rows = asks.iter().map(|a| Row { id: a.id.clone(), state: "queued".into(), began: None, seconds: None, tokens: 0 }).collect();
     let board = Arc::new(Mutex::new(Board { title: title.to_string(), rows, began: Instant::now(), drawn: 0 }));
@@ -106,8 +112,13 @@ pub fn run(title: &str, setup: &Setup, asks: Vec<Ask>, n: usize) -> Vec<Result<A
         });
         let mut handles = Vec::new();
         for (i, ask) in asks.iter().enumerate() {
-            if i == 1 && asks.len() > 1 {
-                std::thread::sleep(Duration::from_secs_f64(WARM));
+            if let (1, Some(w)) = (i, &warm) {
+                let (lock, cv) = &**w;
+                let up = lock.lock().unwrap();
+                let _ = cv.wait_timeout_while(up, Duration::from_secs_f64(WARM_AT_MOST), |up| !*up).unwrap();
+                if !live {
+                    println!("[run {:6.1} s] the first agent's prompt is in the cache: the others start", run_s());
+                }
             }
             let (board, slots, results) = (board.clone(), slots.clone(), results.clone());
             handles.push(scope.spawn(move || {
