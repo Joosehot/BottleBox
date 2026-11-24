@@ -37,6 +37,8 @@ pub enum How {
     Baseline(usize),
     /// minion files per task (1: implementation with its tests; 2: implementation, tests), and merge minions or not
     Swarm { per_task: usize, merge_minions: bool },
+    /// no director: every minion directs its own piece, all thinking together in the Box (hive.rs)
+    Hive,
 }
 
 pub struct Options {
@@ -239,6 +241,7 @@ pub fn run(o: &Options) -> Result<Report, String> {
     let (mode, tag) = match o.how {
         How::Baseline(k) => (format!("{k} Claude Code agents in parallel"), format!("baseline{k}")),
         How::Swarm { per_task, .. } => (format!("Bottle Box, {per_task} minion file(s) a task"), format!("swarm{per_task}")),
+        How::Hive => ("Bottle Box hive, every minion a director".to_string(), "hive".to_string()),
     };
     let run_dir = agent::home().join("runs").join(format!("{stamp}-code-{tag}"));
     std::fs::create_dir_all(&run_dir).map_err(|e| e.to_string())?;
@@ -292,6 +295,9 @@ pub fn run(o: &Options) -> Result<Report, String> {
         let cargo_all: f64 = done.iter().map(|a| a.cargo_seconds).sum();
         let result = format!("{} ({passed} tests passed, {failed} failed; {n} source files in {} crates; the agents spent {cargo_all:.0} s in cargo in all)", if ok { "ALL TESTS PASS" } else { "TESTS FAIL" }, dirs.len());
         return Ok(finish(mode, steps, wall, result, run_dir, split, &o.dir, Vec::new()));
+    }
+    if let How::Hive = o.how {
+        return crate::hive::run(o, mode, run_dir, wall);
     }
     let How::Swarm { per_task, merge_minions } = o.how else { unreachable!() };
     crate::workspace::run(o, per_task, merge_minions, mode, run_dir, wall)

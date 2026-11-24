@@ -7,7 +7,7 @@
 //!
 //! --agents N: how many agents run at once (the rest wait their turn).
 //! code --baseline K: K ordinary Claude Code agents at once instead of the swarm.
-//! code --bench: the swarm (2 files a task: 20 minions for 10 tasks) against 5 Claude Code agents, side by side;
+//! code --bench: the hive (no director; 2 files a task: 20 minions for 10 tasks; --director for the director's swarm) against 5 Claude Code agents, side by side;
 //! --third adds 10 minions (1 file a task).
 
 #[allow(dead_code)]
@@ -19,6 +19,7 @@ mod nimbus;
 mod agent;
 mod clip;
 mod code;
+mod hive;
 mod shared;
 mod swarm;
 mod workspace;
@@ -125,7 +126,7 @@ fn main() {
             let agents = num("--agents", "20") as usize;
             let runs: Vec<(code::How, &str)> = if flag("--bench") {
                 // the ratio rule: 20 minions against 5 Claude Code agents (and with --third, 10 minions, one a task)
-                let mut v = vec![(code::How::Swarm { per_task: 2, merge_minions: false }, "swarm20"), (code::How::Baseline(5), "baseline5")];
+                let mut v = vec![(if flag("--director") { code::How::Swarm { per_task: 2, merge_minions: false } } else { code::How::Hive }, "swarm20"), (code::How::Baseline(5), "baseline5")];
                 if flag("--third") {
                     v.push((code::How::Swarm { per_task: 1, merge_minions: false }, "swarm10"));
                 }
