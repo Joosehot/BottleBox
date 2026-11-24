@@ -81,7 +81,17 @@ pub struct Ask {
     /// told when the model's first token comes (its prompt is in the cache by then): the swarm
     /// starts the other agents only after the first one's prompt has written the cache
     pub first_token: Option<Signal>,
+    /// a stock Claude Code agent (the benchmark's baseline): see `STOCK`
+    pub stock: bool,
 }
+
+/// The baseline of every benchmark, FROZEN: a stock Claude Code agent on Claude Opus 5.5 with its
+/// default settings (the user's own settings, plugins and MCP servers, its default tools and system
+/// prompt, its default effort). Only what an unattended `claude -p` cannot do without is given:
+/// permission to edit files and to run cargo (nobody is there to answer a permission prompt), and an
+/// output format that carries the token counts. Do not change this, and never give it any of Bottle
+/// Box's improvements.
+pub const STOCK: [&str; 9] = ["-p", "--model", "claude-opus-5-5", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits", "--allowedTools=Bash(cargo:*)"];
 
 /// A flag one thread raises and others wait for.
 pub type Signal = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
@@ -93,7 +103,7 @@ pub fn raise(s: &Signal) {
 
 impl Ask {
     pub fn minion(id: &str, prompt: String, model: &str, want: Want) -> Ask {
-        Ask { id: id.to_string(), prompt, model: model.to_string(), keep: false, resume: None, effort: Some("low".into()), want, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None, first_token: None }
+        Ask { id: id.to_string(), prompt, model: model.to_string(), keep: false, resume: None, effort: Some("low".into()), want, tools: "Read".into(), allow: Vec::new(), workdir: None, mcp: None, max_output: None, first_token: None, stock: false }
     }
 }
 
@@ -184,9 +194,17 @@ pub fn run(setup: &Setup, ask: &Ask, status: &dyn Fn(&str)) -> Result<Answer, St
         attempts += 1;
         status("running");
         let mut c = Command::new("claude");
-        c.current_dir(ask.workdir.as_ref().unwrap_or(&setup.workdir)).args(["-p", "--model", &ask.model]);
-        // no user settings (so no plugins such as Shallow, no hooks), no skills, no MCP servers, for every agent of the box
-        c.args(["--setting-sources", "project", "--disable-slash-commands", "--strict-mcp-config"]);
+        c.current_dir(ask.workdir.as_ref().unwrap_or(&setup.workdir));
+        if ask.stock {
+            // the frozen baseline: STOCK and nothing else
+            c.args(STOCK);
+        } else {
+            c.args(["-p", "--model", &ask.model]);
+            // no user settings (so no plugins such as Shallow, no hooks), no skills, no MCP servers, for every agent of the box
+            c.args(["--setting-sources", "project", "--disable-slash-commands", "--strict-mcp-config"]);
+        }
+        let streamed = ask.stock || (ask.want == Want::Text && !ask.tools.is_empty()) || ask.first_token.is_some();
+        if !ask.stock {
         if let Some(s) = &setup.shared {
             c.arg("--system-prompt-file").arg(s);
         }
@@ -217,13 +235,13 @@ pub fn run(setup: &Setup, ask: &Ask, status: &dyn Fn(&str)) -> Result<Answer, St
         }
         // an agent that works with its tools is read as a stream, so the time its cargo commands take can be told apart;
         // so is one whose first token is waited for (with the partial messages, which come as the model writes)
-        let streamed = (ask.want == Want::Text && !ask.tools.is_empty()) || ask.first_token.is_some();
         c.args(["--output-format", if streamed { "stream-json" } else { "json" }]);
         if streamed {
             c.arg("--verbose");
         }
         if ask.first_token.is_some() {
             c.arg("--include-partial-messages");
+        }
         }
         let mut child = c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("claude: {e}"))?;
         child.stdin.take().unwrap().write_all(prompt.as_bytes()).map_err(|e| e.to_string())?;

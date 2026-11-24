@@ -261,19 +261,22 @@ pub fn run(o: &Options) -> Result<Report, String> {
         for (g, mine) in groups.iter().enumerate() {
             let d = o.dir.join(format!("agent-{}", g + 1));
             fresh(&d)?;
+            // a stock Claude Code agent (agent::STOCK, frozen): its own model, settings and tools; only the prompt and the folder are ours
             asks.push(Ask {
                 id: format!("agent-{}", g + 1),
                 prompt: format!("{common}\n\nYour tasks:\n{}\n\nWork in this folder (it is empty; git is set up). Make it one Rust library crate with one module for each of your tasks and their tests, then run `cargo test --release` until every test passes.", mine.join("\n")),
-                model: o.model.clone(),
+                model: String::new(),
                 keep: false,
                 resume: None,
                 effort: None,
                 want: Want::Text,
-                tools: "Read,Write,Edit,Bash,Glob,Grep".into(),
-                allow: vec!["Bash(cargo:*)".into(), "Bash(git:*)".into(), "Bash(ls:*)".into(), "Bash(mkdir:*)".into()],
+                tools: String::new(),
+                allow: Vec::new(),
                 workdir: Some(d),
                 mcp: None,
-                max_output: None, first_token: None,
+                max_output: None,
+                first_token: None,
+                stock: true,
             });
         }
         let setup = Setup { shared: None, workdir: o.dir.clone(), read: Vec::new() };

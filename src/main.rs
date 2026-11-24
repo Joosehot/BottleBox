@@ -2,8 +2,8 @@
 //! the same time and sharing one context, so it is done in seconds instead
 //! of minutes. General-purpose; its first drivers are Bottle Clip and code.
 //!
-//!   bottlebox clip <url> [--style hype] [--length 30] [--agents 20] [--candidates 12] [--model sonnet] [--single] [--compare]
-//!   bottlebox code --task-file FILE --dir DIR [--agents 20] [--per-task 2] [--merge-minions] [--model sonnet] [--baseline 5] [--bench]
+//!   bottlebox clip <url> [--style hype] [--length 30] [--agents 20] [--candidates 12] [--model claude-opus-5-5] [--single] [--compare]
+//!   bottlebox code --task-file FILE --dir DIR [--agents 20] [--per-task 2] [--merge-minions] [--model claude-opus-5-5] [--baseline 5] [--bench]
 //!
 //! --agents N: how many agents run at once (the rest wait their turn).
 //! code --baseline K: K ordinary Claude Code agents at once instead of the swarm.
@@ -93,7 +93,7 @@ fn main() {
         eprintln!("{name}: not a number");
         std::process::exit(2)
     });
-    let usage = "bottlebox clip <url> [--style hype] [--length 30] [--agents 20] [--candidates 12] [--model sonnet] [--single] [--compare]\nbottlebox code --task-file FILE --dir DIR [--agents 20] [--per-task 2] [--merge-minions] [--baseline K] [--bench] [--model sonnet]";
+    let usage = "bottlebox clip <url> [--style hype] [--length 30] [--agents 20] [--candidates 12] [--model claude-opus-5-5] [--single] [--compare]\nbottlebox code --task-file FILE --dir DIR [--agents 20] [--per-task 2] [--merge-minions] [--baseline K] [--bench] [--model claude-opus-5-5]";
     let fail = |e: String| -> ! {
         eprintln!("bottlebox: {e}");
         std::process::exit(1)
@@ -117,7 +117,7 @@ fn main() {
             let Some(url) = args.get(1) else { fail(usage.into()) };
             let runs: Vec<bool> = if flag("--compare") { vec![false, true] } else { vec![flag("--single")] };
             for single in runs {
-                let o = clip::Options { url: url.clone(), style: value("--style", "hype"), length: num("--length", "30"), agents: num("--agents", "20") as usize, candidates: num("--candidates", "12") as usize, model: value("--model", "sonnet"), single };
+                let o = clip::Options { url: url.clone(), style: value("--style", "hype"), length: num("--length", "30"), agents: num("--agents", "20") as usize, candidates: num("--candidates", "12") as usize, model: value("--model", "claude-opus-5-5"), single };
                 let r = clip::run(&o).unwrap_or_else(|e| fail(e));
                 print(&r);
                 done.push(r);
@@ -129,7 +129,7 @@ fn main() {
             if dir.as_os_str().is_empty() {
                 fail(usage.into());
             }
-            let model = value("--model", "sonnet");
+            let model = value("--model", "claude-opus-5-5");
             let agents = num("--agents", "20") as usize;
             let runs: Vec<(code::How, &str)> = if flag("--bench") {
                 // the ratio rule: 20 minions against 5 Claude Code agents (and with --third, 10 minions, one a task)
