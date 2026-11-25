@@ -175,6 +175,11 @@ bottlebox box-mcp --box DIR --as ID    the Box's MCP server for one agent
 - `--bench`: Bottle Box, then the frozen baseline, then the two side by side.
 - `--agents N`: the most agents running at once.
 - The task file is plain text; its numbered lines (`1. ...`) are the tasks.
+- Its head may name the crate, its dependencies and a binary:
+  `Crate: my_crate`, `Dependencies: cpal = "0.15"; crossterm = "0.28"`,
+  `Binary: ui::run` (a `fn run() -> Result<(), String>` the binary calls).
+  A task that uses other modules is tested with them beside it, as soon as
+  they are written; the dependencies are built once, while the directors think.
 
 ## Logs and what is measured
 

@@ -86,7 +86,17 @@ pub(crate) fn tasks(text: &str) -> (String, Vec<String>) {
 
 /// The build and the tests (release): (passed, the output, tests passed, tests failed).
 pub(crate) fn test(dir: &Path) -> (bool, String, usize, usize) {
-    let out = Command::new("cargo").current_dir(dir).args(["test", "--release", "--message-format", "short", "--color", "never"]).env("CARGO_TERM_COLOR", "never").stdin(Stdio::null()).output();
+    test_in(dir, None)
+}
+
+/// The same, building into `target` (one target folder shared by many crates: their dependencies are built once).
+pub(crate) fn test_in(dir: &Path, target: Option<&Path>) -> (bool, String, usize, usize) {
+    let mut c = Command::new("cargo");
+    c.current_dir(dir).args(["test", "--release", "--message-format", "short", "--color", "never"]).env("CARGO_TERM_COLOR", "never").stdin(Stdio::null());
+    if let Some(t) = target {
+        c.env("CARGO_TARGET_DIR", t);
+    }
+    let out = c.output();
     let Ok(out) = out else { return (false, "cargo could not be run".into(), 0, 0) };
     let text = format!("{}{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
     // "test result: ok. 12 passed; 0 failed; ...": the number before each word, over every test binary

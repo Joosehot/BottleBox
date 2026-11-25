@@ -141,8 +141,13 @@ fn main() {
                 v
             } else if args.iter().any(|a| a == "--baseline") {
                 vec![(code::How::Baseline(num("--baseline", "5") as usize), "")]
-            } else {
+            } else if flag("--director") {
                 vec![(code::How::Swarm { per_task: num("--per-task", "2") as usize, merge_minions: flag("--merge-minions") }, "")]
+            } else if flag("--hive") {
+                vec![(code::How::Hive, "")]
+            } else {
+                // the default: the best mode (one director a task, minions by workload)
+                vec![(code::How::Load, "")]
             };
             let many = runs.len() > 1;
             for (how, name) in runs {

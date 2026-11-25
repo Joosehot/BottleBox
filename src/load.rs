@@ -85,6 +85,64 @@ fn join(parts: &[String]) -> String {
     format!("{head}{}\n", body.into_iter().filter(|b| !b.is_empty()).collect::<Vec<_>>().join("\n\n"))
 }
 
+/// What the task's head says about the crate: its name, its dependencies (Cargo lines), the function
+/// a binary runs (`module::function`, returning `Result<(), String>`).
+struct Head {
+    krate: String,
+    deps: Vec<String>,
+    binary: Option<String>,
+}
+
+fn header(task: &str) -> Head {
+    let mut h = Head { krate: "tasks".into(), deps: Vec::new(), binary: None };
+    for l in task.lines().map(str::trim) {
+        if let Some(v) = l.strip_prefix("Crate:") {
+            h.krate = v.trim().to_string();
+        } else if let Some(v) = l.strip_prefix("Dependencies:") {
+            h.deps = v.split(';').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
+        } else if let Some(v) = l.strip_prefix("Binary:") {
+            h.binary = Some(v.trim().to_string());
+        }
+    }
+    h
+}
+
+/// The crate's modules a source uses (`crate::m`, `super::m` at the top, `<crate>::m`), of those named.
+fn uses(text: &str, krate: &str, modules: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for prefix in ["crate::".to_string(), format!("{krate}::")] {
+        for (i, _) in text.match_indices(&prefix) {
+            let name: String = text[i + prefix.len()..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            if modules.contains(&name) && !found.contains(&name) {
+                found.push(name);
+            }
+        }
+    }
+    found
+}
+
+/// The tasks whose modules task `k` uses, all the way down, if every one of them is written; else None.
+fn needed(k: usize, tasks: &[Task], files: &BTreeMap<usize, BTreeMap<String, String>>, krate: &str) -> Option<Vec<usize>> {
+    let modules: Vec<String> = tasks.iter().map(|t| t.module.clone()).collect();
+    let (mut want, mut todo, mut seen) = (Vec::new(), vec![k], std::collections::BTreeSet::from([k]));
+    while let Some(j) = todo.pop() {
+        let f = files.get(&j)?;
+        // the task itself is read whole (its tests too); a module it uses, by its source
+        let text = if j == k { f.values().cloned().collect::<Vec<_>>().join("\n") } else { f.get(&format!("src/{}.rs", tasks[j].module))?.clone() };
+        for m in uses(&text, krate, &modules) {
+            let i = modules.iter().position(|x| *x == m).unwrap();
+            if seen.insert(i) {
+                want.push(i);
+                todo.push(i);
+            }
+        }
+    }
+    for &i in &want {
+        files.get(&i)?.get(&format!("src/{}.rs", tasks[i].module))?;
+    }
+    Some(want)
+}
+
 enum Event {
     Directed(usize, Result<Answer, String>, f64),
     Built(usize, usize, Result<Answer, String>, f64, f64),
@@ -105,9 +163,28 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
         let (module, title, spec) = module_of(i);
         Task { n: k + 1, module, title, spec }
     }).collect();
-    let cargo_toml = "[package]\nname = \"tasks\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n";
-    agent::write(&o.dir.join("Cargo.toml"), cargo_toml)?;
+    // the task's head may name the crate, its dependencies and its binary (`Crate:`, `Dependencies:`, `Binary:`)
+    let head = header(&o.task);
+    let krate = head.krate.clone();
+    let deps = head.deps.iter().map(|d| format!("{d}\n")).collect::<String>();
+    let cargo_toml = format!("[package]\nname = \"{krate}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}");
+    agent::write(&o.dir.join("Cargo.toml"), &cargo_toml)?;
     agent::write(&o.dir.join("src/lib.rs"), &tasks.iter().map(|t| format!("pub mod {};\n", t.module)).collect::<String>())?;
+    if let Some(bin) = &head.binary {
+        agent::write(&o.dir.join("src/main.rs"), &format!("fn main() {{\n    if let Err(e) = {krate}::{bin}() {{\n        eprintln!(\"{{e}}\");\n        std::process::exit(1);\n    }}\n}}\n"))?;
+    }
+    // one target folder for every check and the final test: the dependencies are built once, and
+    // built now, while the directors think
+    let target = run_dir.join("target");
+    let warm_deps = run_dir.join("deps");
+    agent::write(&warm_deps.join("Cargo.toml"), &format!("[package]\nname = \"deps_warm\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}"))?;
+    agent::write(&warm_deps.join("src/lib.rs"), "")?;
+    if !head.deps.is_empty() {
+        let (d, t) = (warm_deps.clone(), target.clone());
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("cargo").current_dir(&d).args(["test", "--release", "--no-run", "-q"]).env("CARGO_TARGET_DIR", &t).stdin(std::process::Stdio::null()).output();
+        });
+    }
     agent::write(&o.dir.join(".gitignore"), "/target\n")?;
     code::commit(&o.dir, "the split: the glue")?;
     // a worktree and a small crate (to test it alone) for each task
@@ -115,17 +192,18 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
     for (k, task) in tasks.iter().enumerate() {
         code::git(&o.dir, &["worktree", "add", "-q", "-b", &format!("task-{k:03}"), &wt.join(format!("{k:03}")).display().to_string(), "main"])?;
         let d = run_dir.join("check").join(&task.module);
-        agent::write(&d.join("Cargo.toml"), cargo_toml)?;
+        // its own package, its library named as the crate (its tests say `crate_name::module`)
+        agent::write(&d.join("Cargo.toml"), &format!("[package]\nname = \"check_{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"{krate}\"\npath = \"src/lib.rs\"\n\n[dependencies]\n{deps}", task.module))?;
         agent::write(&d.join("src/lib.rs"), &format!("pub mod {};\n", task.module))?;
     }
     code::step(&mut steps, "split and glue (no agent)", &mut t, &[]);
 
     // the shared prefix: the rules and the whole task, the same text for every agent (cached once)
-    let rules = "You are one minion of a hive in Bottle Box: many minions build one crate together at the same time, sharing one Box (a registry of who builds what, a board). Each minion writes only its own piece. Rust, edition 2021, standard library only; the crate is `tasks`, one module a task (`tasks::<module>`); tests run with `cargo test --release`. Lean code: the smallest code that does the task well. Rust has no default arguments: every call gives every argument of the registered signature.";
+    let rules = format!("You are one minion of a hive in Bottle Box: many minions build one crate together at the same time, sharing one Box (a registry of who builds what, a board). Each minion writes only its own piece. Rust, edition 2021, {}; the crate is `{krate}`, one module a task (`crate::<module>` inside it, `{krate}::<module>` from its tests); a module uses another only through the public API the task text gives it; tests run with `cargo test --release`. Lean code: the smallest code that does the task well. Rust has no default arguments: every call gives every argument of the registered signature.", if head.deps.is_empty() { "standard library only".to_string() } else { format!("dependencies: {}", head.deps.join("; ")) });
     let prefix = run_dir.join("prefix.txt");
     agent::write(&prefix, &format!("{rules}\n\nTHE WHOLE TASK:\n{}\n", o.task))?;
     let setup = Setup { shared: Some(prefix), workdir: run_dir.clone(), read: Vec::new() };
-    let ask = |id: &str, prompt: String, want: Want, effort: &str| -> Ask { Ask { tools: "".into(), max_output: Some(MINION_OUTPUT), effort: Some(effort.into()), ..Ask::minion(id, prompt, &o.model, want) } };
+    let ask = |id: &str, prompt: String, want: Want, effort: &str| -> Ask { Ask { tools: "".into(), max_output: Some(MINION_OUTPUT), effort: Some(effort.into()), ..Ask::minion(id, prompt.replace("tasks::", &format!("{krate}::")), &o.model, want) } };
     let src = |m: &str| format!("src/{m}.rs");
     let tst = |m: &str| format!("tests/{m}.rs");
 
@@ -147,6 +225,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
     let mut files: BTreeMap<usize, BTreeMap<String, String>> = BTreeMap::new();
     let mut tries: BTreeMap<usize, usize> = BTreeMap::new();
     let mut passed: BTreeMap<usize, bool> = BTreeMap::new();
+    let mut waiting: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let mut minions = 0usize;
     let mut waits: Vec<f64> = Vec::new();
     let mut thinking_s = 0.0;
@@ -179,12 +258,41 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
             pending += 1;
         }
 
-        let test_task = |k: usize, tx: mpsc::Sender<Event>| {
+        // a task is tested in its own crate, with the modules it uses (as they are written now) beside it
+        let test_task = |k: usize, dep_files: Vec<(String, String)>, mods: Vec<String>, tx: mpsc::Sender<Event>| {
             let d = run_dir.join("check").join(&tasks[k].module);
+            for (p, c) in &dep_files {
+                let _ = agent::write(&d.join(p), c);
+            }
+            let lib: String = std::iter::once(tasks[k].module.clone()).chain(mods).map(|m| format!("pub mod {m};\n")).collect();
+            let _ = agent::write(&d.join("src/lib.rs"), &lib);
+            let target = &target;
             s.spawn(move || {
-                let (ok, text, _, _) = code::test(&d);
+                let (ok, text, _, _) = code::test_in(&d, Some(target));
                 let _ = tx.send(Event::Tested(k, ok, text));
             });
+        };
+        // the tasks whose files are written are tested as soon as every module they use is written too;
+        // the others wait
+        let try_tests = |ks: Vec<usize>, files: &BTreeMap<usize, BTreeMap<String, String>>, waiting: &mut std::collections::BTreeSet<usize>, pending: &mut usize| {
+            for k in ks {
+                let m = &tasks[k].module;
+                if !files.get(&k).is_some_and(|f| f.contains_key(&src(m)) && f.contains_key(&tst(m))) {
+                    continue;
+                }
+                match needed(k, &tasks, files, &krate) {
+                    Some(deps) => {
+                        waiting.remove(&k);
+                        let dep_files = deps.iter().map(|&j| (src(&tasks[j].module), files[&j][&src(&tasks[j].module)].clone())).collect();
+                        let mods = deps.iter().map(|&j| tasks[j].module.clone()).collect();
+                        test_task(k, dep_files, mods, tx.clone());
+                        *pending += 1;
+                    }
+                    None => {
+                        waiting.insert(k);
+                    }
+                }
+            }
         };
         let place = |k: usize, path: &str, content: &str| -> Result<(), String> {
             agent::write(&wt.join(format!("{k:03}")).join(path), content)?;
@@ -288,11 +396,13 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                     }
                     sessions.insert((k, j), a.session.clone());
                     builders.push(a);
+                    let mut ks: Vec<usize> = waiting.iter().copied().collect();
                     if files.get(&k).is_some_and(|f| f.contains_key(&src(&task.module)) && f.contains_key(&tst(&task.module))) && !passed.contains_key(&k) && tries.get(&k).is_none() {
                         tries.insert(k, 0);
-                        test_task(k, tx.clone());
-                        pending += 1;
+                        ks.push(k);
                     }
+                    // this task, and those waiting for a module it may have given
+                    try_tests(ks, &files, &mut waiting, &mut pending);
                 }
                 Event::Tested(k, ok, text) => {
                     let task = &tasks[k];
@@ -333,11 +443,13 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                     for (path, c) in agent::files_in(&notes(&a.text).0) {
                         if path == src(&task.module) || path == tst(&task.module) {
                             place(k, &path, &c)?;
+                            files.entry(k).or_default().insert(path.clone(), c.clone());
                         }
                     }
                     fixers.push(a);
-                    test_task(k, tx.clone());
-                    pending += 1;
+                    let mut ks: Vec<usize> = waiting.iter().copied().collect();
+                    ks.push(k);
+                    try_tests(ks, &files, &mut waiting, &mut pending);
                 }
             }
         }
@@ -379,7 +491,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
     }
     let merge_s = t.elapsed().as_secs_f64();
     code::step(&mut steps, &format!("merge ({rounds} rounds, in pairs)"), &mut t, &[]);
-    let outcome = code::test(&o.dir);
+    let outcome = code::test_in(&o.dir, Some(&target));
     agent::write(&run_dir.join("test-whole.txt"), &outcome.1)?;
     code::step(&mut steps, "test the whole crate", &mut t, &[]);
 
