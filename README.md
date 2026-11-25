@@ -200,7 +200,8 @@ bottlebox box-mcp --box DIR --as ID    the Box's MCP server for one agent
 - The task split assumes numbered, independent tasks; tasks that depend on
   each other lean more on the registry and the board.
 - Bottle Box reads Strike's Nimbus store from `../Strike`
-  (`src/main.rs`, `#[path]`); clone it beside this repo to build.
+  (`src/main.rs`, `#[path]`): clone [Strike](https://github.com/Joosehot/Strike)
+  beside this repo to build.
 
 ## Layout
 
@@ -220,7 +221,8 @@ bottlebox box-mcp --box DIR --as ID    the Box's MCP server for one agent
 ## Requirements
 
 Claude Code (`claude` on PATH, logged in to a Claude subscription), Rust,
-git, and Strike beside this repo (`../Strike`). The clip driver also needs
+git, and [Strike](https://github.com/Joosehot/Strike) cloned beside this repo
+(`../Strike`). The clip driver also needs
 Bottle Clip installed (`~/.bottleclip/bin/bottle-clip.exe`).
 
 ## License
