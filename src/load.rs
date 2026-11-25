@@ -44,6 +44,21 @@ const TOKENS_PER_LINE: u64 = 40;
 const MOST_OUTPUT: u64 = 32000;
 const MAX_MINIONS: usize = 20;
 
+/// The minions each task may have, decided before any director answers, so that a big task whose
+/// director answers late does not find them all taken: one each, and the rest (of `most`) by the
+/// length of the tasks' descriptions, at most three more to a task (three sections and the tests).
+fn reserve(lengths: &[usize], most: usize) -> Vec<usize> {
+    let mut r = vec![1usize; lengths.len()];
+    let mut extra = most.saturating_sub(lengths.len());
+    while extra > 0 {
+        // the task with the most description per minion so far, among those that can still take one
+        let Some(k) = (0..r.len()).filter(|k| r[*k] < 4).max_by(|a, b| (lengths[*a] * r[*b]).cmp(&(lengths[*b] * r[*a])).then(b.cmp(a))) else { break };
+        r[k] += 1;
+        extra -= 1;
+    }
+    r
+}
+
 /// The output cap for writing so many lines.
 fn output_for(lines: u64) -> u32 {
     (lines * TOKENS_PER_LINE).clamp(MINION_OUTPUT as u64, MOST_OUTPUT) as u32
@@ -260,6 +275,9 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
     let mut passed: BTreeMap<usize, bool> = BTreeMap::new();
     let mut waiting: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let mut minions = 0usize;
+    let reserved = reserve(&tasks.iter().map(|t| t.spec.len()).collect::<Vec<_>>(), MAX_MINIONS);
+    // the reserved minions a task did not need, free for any task directed after it
+    let mut spare = 0usize;
     let mut waits: Vec<f64> = Vec::new();
     let mut thinking_s = 0.0;
     let mut pending = 0usize;
@@ -269,6 +287,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
     let warm = Ask { keep: true, ..ask("warm", "You are one of the hive's directors. Your task comes in the next message. Reply with OK.".into(), Want::Text, EFFORT) };
     let warmed = agent::run(&setup, &warm, &|_| {})?;
     say("the shared prefix is cached in a session: the directors go on from it".into(), &mut log);
+    say(format!("minions reserved, by the tasks' size: {}", tasks.iter().zip(&reserved).map(|(t, r)| format!("{} {r}", t.n)).collect::<Vec<_>>().join(", ")), &mut log);
     let warm_session = warmed.session.clone();
     let mut sessions: BTreeMap<(usize, usize), String> = BTreeMap::new();
 
@@ -276,7 +295,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
         // 1. think together: one director a task, all at once
         for (k, task) in tasks.iter().enumerate() {
             let prompt = format!(
-                "You direct task {} ({}: {}), module `tasks::{}`. Think it through once and decide it whole, for the minions who will build it: its public API (every pub item with its exact Rust signature), its conventions (names, formats, error values), a few test cases with exact answers written as calls of exactly that API, and the size of its implementation. If the implementation needs more than about {BIG} lines, split it into 2 or 3 sections, each a separate set of its items (the types and constants in the first). Sections are written apart, so a struct's signature lists all its fields, the private ones too, with their types: every section uses those and no other. Reply with ONE JSON object: \
+                "You direct task {} ({}: {}), module `tasks::{}`. Think it through once and decide it whole, for the minions who will build it: its public API (every pub item with its exact Rust signature), its conventions (names, formats, error values), a few test cases with exact answers written as calls of exactly that API, and the size of its implementation. If the implementation needs more than about {BIG} lines, split it into 2 or 3 sections, each a separate set of its items (the types and constants in the first); only if you split it: the sections are written apart, so each struct's signature lists all its fields, the private ones too, with their types, and every section uses those and no other. Reply with ONE JSON object: \
 {{\"items\":[{{\"name\":\"{}::<item>\",\"kind\":\"fn|struct|enum|trait|const|type|impl\",\"signature\":\"<exact>\"}}],\"conventions\":\"<at most 3 short lines>\",\"cases\":[\"<a call of the API -> its exact result: at most 5>\"],\"lines\":<the implementation's lines>,\"sections\":[{{\"items\":[\"<item names>\"],\"lines\":<lines>}}]}}",
                 task.n, task.title, task.spec, task.module, task.module
             );
@@ -354,7 +373,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                     // 2. the minions this task needs, by its size
                     let lines = plan["lines"].as_u64().unwrap_or(100);
                     let secs: Vec<(Vec<String>, u64)> = plan["sections"].as_array().into_iter().flatten().map(|x| (x["items"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(String::from)).collect(), x["lines"].as_u64().unwrap_or(60))).filter(|x: &(Vec<String>, u64)| !x.0.is_empty()).collect();
-                    let room = MAX_MINIONS.saturating_sub(minions).max(1);
+                    let room = reserved[k] + spare;
                     let mine: Vec<Piece> = if lines <= SMALL || room == 1 {
                         vec![Piece { kind: "whole".into(), section: 0, sections: 1, items: Vec::new(), lines }]
                     } else if lines > BIG && secs.len() >= 2 && room >= secs.len() + 1 {
@@ -369,6 +388,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                         ]
                     };
                     minions += mine.len();
+                    spare = room - mine.len();
                     say(format!("task {} directed: about {lines} lines -> {} minion(s): {}", task.n, mine.len(), mine.iter().map(|p| p.kind.clone()).collect::<Vec<_>>().join(", ")), &mut log);
                     plans.insert(k, plan.clone());
                     pieces.insert(k, mine.clone());
@@ -549,7 +569,22 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::join;
+    use super::{join, reserve};
+
+    #[test]
+    fn minions_are_reserved_by_the_tasks_size() {
+        // 14 tasks, 20 minions: each one, and the six more to the longest
+        let lengths = [900, 1500, 2000, 1600, 1100, 2900, 2300, 1300, 2300, 600, 400, 2500, 1000, 2600];
+        let r = reserve(&lengths, 20);
+        assert_eq!(r.iter().sum::<usize>(), 20);
+        assert!(r.iter().all(|m| (1..=4).contains(m)));
+        assert!(r[5] >= 2 && r[13] >= 2 && r[11] >= 2, "{r:?}");
+        assert_eq!((r[10], r[9]), (1, 1));
+        // more tasks than minions: one each still
+        assert_eq!(reserve(&[5; 25], 20), vec![1; 25]);
+        // few tasks: at most four each
+        assert_eq!(reserve(&[100, 100], 20), vec![4, 4]);
+    }
 
     #[test]
     fn inner_docs_go_above_the_use_lines() {
