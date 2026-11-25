@@ -74,24 +74,48 @@ struct Piece {
     lines: u64,
 }
 
-/// Joins a file's sections: their `use` lines once at the top, then the sections in order.
+/// Joins a file's sections: the module's inner doc lines (`//!`) and inner attributes (`#![..]`)
+/// first, then the `use` statements once (a statement over several lines kept whole), then the
+/// sections in order. (Put under the `use` lines, a `//!` would not compile: E0753.)
 fn join(parts: &[String]) -> String {
-    let (mut uses, mut body): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    let (mut inner, mut uses, mut body): (Vec<String>, Vec<String>, Vec<String>) = (Vec::new(), Vec::new(), Vec::new());
     for p in parts {
-        let mut rest = Vec::new();
+        let mut rest: Vec<String> = Vec::new();
+        let mut open: Option<String> = None;
         for l in p.lines() {
-            if l.starts_with("use ") {
-                if !uses.contains(&l.to_string()) {
-                    uses.push(l.to_string());
+            if let Some(u) = open.as_mut() {
+                u.push('\n');
+                u.push_str(l);
+                if l.trim_end().ends_with(';') {
+                    let u = open.take().unwrap();
+                    if !uses.contains(&u) {
+                        uses.push(u);
+                    }
+                }
+            } else if l.starts_with("use ") || l.starts_with("pub use ") {
+                if l.trim_end().ends_with(';') {
+                    if !uses.contains(&l.to_string()) {
+                        uses.push(l.to_string());
+                    }
+                } else {
+                    open = Some(l.to_string());
+                }
+            } else if l.starts_with("//!") || l.starts_with("#![") {
+                if !inner.contains(&l.to_string()) {
+                    inner.push(l.to_string());
                 }
             } else {
-                rest.push(l);
+                rest.push(l.to_string());
             }
+        }
+        // a `use` never ended (cut off): kept as it was written
+        if let Some(u) = open {
+            rest.push(u);
         }
         body.push(rest.join("\n").trim().to_string());
     }
-    let head = if uses.is_empty() { String::new() } else { format!("{}\n\n", uses.join("\n")) };
-    format!("{head}{}\n", body.into_iter().filter(|b| !b.is_empty()).collect::<Vec<_>>().join("\n\n"))
+    let block = |v: &Vec<String>| if v.is_empty() { String::new() } else { format!("{}\n\n", v.join("\n")) };
+    format!("{}{}{}\n", block(&inner), block(&uses), body.into_iter().filter(|b| !b.is_empty()).collect::<Vec<_>>().join("\n\n"))
 }
 
 /// What the task's head says about the crate: its name, its dependencies (Cargo lines), the function
@@ -252,7 +276,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
         // 1. think together: one director a task, all at once
         for (k, task) in tasks.iter().enumerate() {
             let prompt = format!(
-                "You direct task {} ({}: {}), module `tasks::{}`. Think it through once and decide it whole, for the minions who will build it: its public API (every pub item with its exact Rust signature), its conventions (names, formats, error values), a few test cases with exact answers written as calls of exactly that API, and the size of its implementation. If the implementation needs more than about {BIG} lines, split it into 2 or 3 sections, each a separate set of its items (the types and constants in the first). Reply with ONE JSON object: \
+                "You direct task {} ({}: {}), module `tasks::{}`. Think it through once and decide it whole, for the minions who will build it: its public API (every pub item with its exact Rust signature), its conventions (names, formats, error values), a few test cases with exact answers written as calls of exactly that API, and the size of its implementation. If the implementation needs more than about {BIG} lines, split it into 2 or 3 sections, each a separate set of its items (the types and constants in the first). Sections are written apart, so a struct's signature lists all its fields, the private ones too, with their types: every section uses those and no other. Reply with ONE JSON object: \
 {{\"items\":[{{\"name\":\"{}::<item>\",\"kind\":\"fn|struct|enum|trait|const|type|impl\",\"signature\":\"<exact>\"}}],\"conventions\":\"<at most 3 short lines>\",\"cases\":[\"<a call of the API -> its exact result: at most 5>\"],\"lines\":<the implementation's lines>,\"sections\":[{{\"items\":[\"<item names>\"],\"lines\":<lines>}}]}}",
                 task.n, task.title, task.spec, task.module, task.module
             );
@@ -521,4 +545,31 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
         ("idle".into(), format!("{waited_most:.1} s at most from a task's plan to its minion starting; {busy:.0} minion-seconds of work")),
         ("merge time".into(), format!("{merge_s:.1} s")),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join;
+
+    #[test]
+    fn inner_docs_go_above_the_use_lines() {
+        // the case of exhaust.rs and controls.rs (E0753): one section that starts with `//!`
+        let got = join(&["//! The pipe.\n\nuse std::f32::consts::PI;\n\npub fn a() -> f32 { PI }\n".into()]);
+        assert_eq!(got, "//! The pipe.\n\nuse std::f32::consts::PI;\n\npub fn a() -> f32 { PI }\n");
+    }
+
+    #[test]
+    fn a_use_over_several_lines_stays_whole_and_once() {
+        // the case of ui.rs: `use a::{` taken up alone left `b, c};` in the body
+        let one = "use crossterm::{\n    cursor,\n    execute,\n};\n\npub fn a() {}\n".to_string();
+        let two = "use crossterm::{\n    cursor,\n    execute,\n};\nuse std::io::Write;\n\npub fn b() {}\n".to_string();
+        let got = join(&[one, two]);
+        assert_eq!(got, "use crossterm::{\n    cursor,\n    execute,\n};\nuse std::io::Write;\n\npub fn a() {}\n\npub fn b() {}\n");
+    }
+
+    #[test]
+    fn the_second_sections_doc_is_not_repeated() {
+        let got = join(&["//! Mod.\n#![allow(dead_code)]\npub fn a() {}\n".into(), "//! Mod.\npub fn b() {}\n".into()]);
+        assert_eq!(got, "//! Mod.\n#![allow(dead_code)]\n\npub fn a() {}\n\npub fn b() {}\n");
+    }
 }
