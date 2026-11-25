@@ -38,7 +38,16 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 const MINION_OUTPUT: u32 = 6000;
+/// a minion's output cap grows with the lines it is to write (a big task that falls to one minion
+/// when the 20 are taken was cut off mid-file at 6000 tokens)
+const TOKENS_PER_LINE: u64 = 40;
+const MOST_OUTPUT: u64 = 32000;
 const MAX_MINIONS: usize = 20;
+
+/// The output cap for writing so many lines.
+fn output_for(lines: u64) -> u32 {
+    (lines * TOKENS_PER_LINE).clamp(MINION_OUTPUT as u64, MOST_OUTPUT) as u32
+}
 /// an implementation of at most this many lines and its tests go to one minion
 const SMALL: u64 = 70;
 /// above this many lines an implementation is split into sections
@@ -352,7 +361,8 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                             _ if p.sections == 1 => format!("{slice}\nBuild {} : exactly the registered API, so that the cases pass; no tests in it (another minion writes them). At most {} lines. Reply with the file only: `=== FILE: {} ===`, its whole content, `=== END ===`.", src(&task.module), p.lines.max(60), src(&task.module)),
                             _ => format!("{slice}\nBuild section {} of {} of {} : the code of only these items: {}. The other sections are written at the same time by other minions; use their items by name, do not write them. Put the `use` lines it needs at its top. At most {} lines. Reply with your section only: `=== FILE: {}#{} ===`, its content, `=== END ===`.", p.section + 1, p.sections, src(&task.module), p.items.join(", "), p.lines.max(40), src(&task.module), p.section + 1),
                         };
-                        let a = Ask { keep: true, resume: Some(director_session.clone()), fork: true, ..ask(&format!("build task {} {}", task.n, p.kind), prompt, Want::Files, EFFORT) };
+                        let writes = if p.kind == "whole" { p.lines.max(60) + 50 } else { p.lines.max(40) };
+                        let a = Ask { keep: true, resume: Some(director_session.clone()), fork: true, max_output: Some(output_for(writes)), ..ask(&format!("build task {} {}", task.n, p.kind), prompt, Want::Files, EFFORT) };
                         let tx = tx.clone();
                         let setup = &setup;
                         let ready = now();
@@ -426,7 +436,9 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                     let current = code::bundle(&run_dir.join("check").join(&task.module), &owned);
                     let prompt = format!("You own {} (task {}) and only them. The build or its tests fail:\n{error}\n\nThe files now:\n{current}\nFix them, keeping the registered API. Do not change an expected answer to match the output unless you are sure it was wrong. Reply with the files you changed, each as `=== FILE: <path> ===` and its whole content, the last ended by `=== END ===`.", owned.join(", "), task.n);
                     // the fix goes on from the conversation of the task's first builder (read from the cache)
-                    let a = Ask { keep: true, resume: sessions.get(&(k, 0)).cloned(), fork: sessions.contains_key(&(k, 0)), ..ask(&format!("fix task {}", task.n), prompt, Want::Files, EFFORT) };
+                    // a fix may rewrite both files whole
+                    let writes = (current.lines().count() as u64).max(60);
+                    let a = Ask { keep: true, resume: sessions.get(&(k, 0)).cloned(), fork: sessions.contains_key(&(k, 0)), max_output: Some(output_for(writes)), ..ask(&format!("fix task {}", task.n), prompt, Want::Files, EFFORT) };
                     shared.post("hive", &format!("task {} back to one minion to fix", task.n))?;
                     let tx = tx.clone();
                     let setup = &setup;
