@@ -21,6 +21,7 @@ mod clip;
 mod code;
 mod hive;
 mod load;
+mod review;
 mod shared;
 mod swarm;
 mod workspace;
@@ -94,7 +95,7 @@ fn main() {
         eprintln!("{name}: not a number");
         std::process::exit(2)
     });
-    let usage = "bottlebox clip <url> [--style hype] [--length 30] [--agents 20] [--candidates 12] [--model claude-opus-5-5] [--single] [--compare]\nbottlebox code --task-file FILE --dir DIR [--agents 20] [--per-task 2] [--merge-minions] [--baseline K] [--bench] [--model claude-opus-5-5]";
+    let usage = "bottlebox clip <url> [--style hype] [--length 30] [--agents 20] [--candidates 12] [--model claude-opus-5-5] [--single] [--compare]\nbottlebox code --task-file FILE --dir DIR [--agents 20] [--per-task 2] [--merge-minions] [--baseline K] [--bench] [--model claude-opus-5-5]\nbottlebox review --dir CRATE --files a.rs,b.rs --checks-file FILE [--context c.rs,d.rs] [--reference x.c,y.h] [--model claude-opus-5-5]";
     let fail = |e: String| -> ! {
         eprintln!("bottlebox: {e}");
         std::process::exit(1)
@@ -112,6 +113,17 @@ fn main() {
             let dir = std::path::PathBuf::from(args.get(1).cloned().unwrap_or_default());
             let (lines, code, dup) = code::measure(&dir);
             println!("{}: {lines} lines; {dup} of {code} code lines duplicated ({:.1} %)", dir.display(), 100.0 * dup as f64 / code.max(1) as f64);
+            return;
+        }
+        Some("review") => {
+            // code that exists, read by one minion a file, then decided and fixed by one director
+            let list = |name: &str| value(name, "").split(',').map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect::<Vec<_>>();
+            let checks = std::fs::read_to_string(value("--checks-file", "")).unwrap_or_else(|e| fail(format!("--checks-file: {e}")));
+            let o = review::Options { dir: std::path::PathBuf::from(value("--dir", ".")), files: list("--files"), context: list("--context"), reference: list("--reference"), checks, model: value("--model", "claude-opus-5-5") };
+            if o.files.is_empty() {
+                fail(usage.into());
+            }
+            review::run(&o).unwrap_or_else(|e| fail(e));
             return;
         }
         Some("clip") => {

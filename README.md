@@ -172,6 +172,17 @@ bottlebox measure <folder>             lines of code and duplicated code of a fo
 bottlebox box-mcp --box DIR --as ID    the Box's MCP server for one agent
 ```
 
+- `bottlebox review --dir CRATE --files src/a.rs,src/b.rs --checks-file FILE`:
+  code that exists, read and mended by many at once. One minion a file, each
+  a fresh mind that did not write it, reports only real issues with their
+  lines, looking for what the checks file says. One director decides which are
+  real and how to mend each (it writes no code). One minion a file then mends,
+  all at once; the crate's tests run, and a failure goes back to the minions
+  whose files it names. The director ends with a verdict, yes or no (a yes
+  with failing tests is a no). `--context` names files the reviewed ones build
+  on: the reviewers see their public items. `--reference` names the material
+  the code was written from (a specification, another implementation): every
+  agent gets its text, and a difference from it is an issue.
 - `--bench`: Bottle Box, then the frozen baseline, then the two side by side.
 - `--agents N`: the most agents running at once.
 - The task file is plain text; its numbered lines (`1. ...`) are the tasks.
