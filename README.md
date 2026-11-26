@@ -180,6 +180,17 @@ bottlebox box-mcp --box DIR --as ID    the Box's MCP server for one agent
   `Binary: ui::run` (a `fn run() -> Result<(), String>` the binary calls).
   A task that uses other modules is tested with them beside it, as soon as
   they are written; the dependencies are built once, while the directors think.
+- The minions have no tools, so what they need from outside is brought to
+  them, named in the head (each may be given on several lines):
+  - `Sources: <url or file>; <url or file> as <name>`: reference material,
+    fetched once before anyone thinks (kept in the run's `sources/`). A task
+    names the ones it needs in its text, `[reads: fwsec.c, hs.h]`; its
+    director gets their text, and its minions read it from the cache.
+  - `Uses: path/to/existing.rs; ...`: modules that exist already. They are
+    put in the crate beside the new ones (`crate::existing`), unchanged, and
+    every agent sees their source (without their unit tests).
+  - `Attributes: #![no_std]`: a line for the top of the crate's `lib.rs`
+    (one `Attributes:` line for each).
 
 ## Logs and what is measured
 

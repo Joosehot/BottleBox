@@ -25,6 +25,15 @@
 //!    failing task goes with its error to one minion (it owns that task's
 //!    files), and blocks nothing else. Then the tournament merge and the
 //!    tests of the whole crate.
+//! 6. **What the minions cannot reach is brought to them.** They have no
+//!    tools: no web, no files. So the task's head may name reference sources
+//!    (`Sources:`, URLs or files: fetched once, before anyone thinks) and
+//!    modules that exist already (`Uses:`: put in the crate beside the new
+//!    ones, their source in the shared prefix). A task names the sources it
+//!    needs (`[reads: a.c, b.h]`); its director gets their text, and its
+//!    minions read it from the cache, going on from the director's
+//!    conversation. `Attributes:` are lines for the top of the crate's
+//!    `lib.rs` (a `#![no_std]` crate).
 
 use crate::agent::{self, Answer, Ask, Setup, Usage, Want};
 use crate::clip::{Report, Step};
@@ -134,26 +143,82 @@ fn join(parts: &[String]) -> String {
 }
 
 /// What the task's head says about the crate: its name, its dependencies (Cargo lines), the function
-/// a binary runs (`module::function`, returning `Result<(), String>`).
+/// a binary runs (`module::function`, returning `Result<(), String>`); the reference sources to
+/// fetch (URLs or files, `<where> as <name>` to name one), the existing modules the new ones build
+/// on (paths of `.rs` files), and lines for the top of `lib.rs` (one `Attributes:` line each).
+/// `Sources:` and `Uses:` may be given on several lines too.
 struct Head {
     krate: String,
     deps: Vec<String>,
     binary: Option<String>,
+    sources: Vec<String>,
+    uses: Vec<String>,
+    attributes: Vec<String>,
 }
 
 fn header(task: &str) -> Head {
-    let mut h = Head { krate: "tasks".into(), deps: Vec::new(), binary: None };
+    let mut h = Head { krate: "tasks".into(), deps: Vec::new(), binary: None, sources: Vec::new(), uses: Vec::new(), attributes: Vec::new() };
+    let list = |v: &str| v.split(';').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect::<Vec<_>>();
     for l in task.lines().map(str::trim) {
         if let Some(v) = l.strip_prefix("Crate:") {
             h.krate = v.trim().to_string();
         } else if let Some(v) = l.strip_prefix("Dependencies:") {
-            h.deps = v.split(';').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
+            h.deps = list(v);
         } else if let Some(v) = l.strip_prefix("Binary:") {
             h.binary = Some(v.trim().to_string());
+        } else if let Some(v) = l.strip_prefix("Sources:") {
+            h.sources.extend(list(v));
+        } else if let Some(v) = l.strip_prefix("Uses:") {
+            h.uses.extend(list(v));
+        } else if let Some(v) = l.strip_prefix("Attributes:") {
+            // a whole line of Rust each (it may hold a `;`)
+            h.attributes.push(v.trim().to_string());
         }
     }
     h
 }
+
+/// A source of the head: where it is, and the name the tasks call it by (`<where> as <name>`, or
+/// the last part of the path).
+fn source(entry: &str) -> (String, String) {
+    match entry.rsplit_once(" as ") {
+        Some((place, name)) => (place.trim().to_string(), name.trim().to_string()),
+        None => (entry.to_string(), entry.rsplit(['/', '\\']).next().unwrap_or(entry).split(['?', '#']).next().unwrap_or(entry).to_string()),
+    }
+}
+
+/// Brings one source: a URL with curl (redirects followed; a busy server is asked again a few times,
+/// any other HTTP error is an error), anything else
+/// read as a file.
+fn bring(place: &str) -> Result<String, String> {
+    if !(place.starts_with("http://") || place.starts_with("https://")) {
+        return std::fs::read_to_string(place).map_err(|e| format!("the source {place}: {e}"));
+    }
+    let out = std::process::Command::new("curl").args(["-sSL", "--fail", "--max-time", "60", "--retry", "5", "--retry-delay", "3", place]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("the source {place} could not be fetched: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The sources a task names in its text: `[reads: a.c, b.h]`.
+fn reads(spec: &str) -> Vec<String> {
+    let Some(at) = spec.find("[reads:") else { return Vec::new() };
+    let rest = &spec[at + 7..];
+    rest[..rest.find(']').unwrap_or(rest.len())].split(',').map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()
+}
+
+/// A module's source without its unit tests (a `#[cfg(test)]` module at its end): what another
+/// module's author needs to read of it.
+fn without_tests(text: &str) -> &str {
+    match text.find("\n#[cfg(test)]\nmod ") {
+        Some(at) => &text[..at + 1],
+        None => text,
+    }
+}
+
+/// a task's sources may be this long together (about 150 000 tokens): its director must still think
+const MOST_SOURCES: usize = 600_000;
 
 /// The crate's modules a source uses (`crate::m`, `super::m` at the top, `<crate>::m`), of those named.
 fn uses(text: &str, krate: &str, modules: &[String]) -> Vec<String> {
@@ -217,7 +282,47 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
     let deps = head.deps.iter().map(|d| format!("{d}\n")).collect::<String>();
     let cargo_toml = format!("[package]\nname = \"{krate}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}");
     agent::write(&o.dir.join("Cargo.toml"), &cargo_toml)?;
-    agent::write(&o.dir.join("src/lib.rs"), &tasks.iter().map(|t| format!("pub mod {};\n", t.module)).collect::<String>())?;
+    // the modules that exist already: in the crate beside the new ones, as they are
+    let mut used: Vec<(String, String)> = Vec::new();
+    for path in &head.uses {
+        let name = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        if name.is_empty() || tasks.iter().any(|t| t.module == name) || used.iter().any(|u| u.0 == name) {
+            return Err(format!("Uses: {path} is not a module of its own name beside the tasks' modules"));
+        }
+        used.push((name, std::fs::read_to_string(path).map_err(|e| format!("Uses: {path}: {e}"))?));
+    }
+    // every lib.rs begins the same: the head's lines, then the existing modules
+    let lib_top: String = head.attributes.iter().map(|a| format!("{a}\n")).chain(used.iter().map(|u| format!("pub mod {};\n", u.0))).collect();
+    for (name, text) in &used {
+        agent::write(&o.dir.join(format!("src/{name}.rs")), text)?;
+    }
+    agent::write(&o.dir.join("src/lib.rs"), &format!("{lib_top}{}", tasks.iter().map(|t| format!("pub mod {};\n", t.module)).collect::<String>()))?;
+    // the reference sources, all fetched at once; each task's own, by the names it reads
+    let named: Vec<(String, String)> = head.sources.iter().map(|e| source(e)).collect();
+    let fetched: Vec<Result<String, String>> = std::thread::scope(|s| {
+        let hs: Vec<_> = named.iter().map(|(place, _)| s.spawn(move || bring(place))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut sources: BTreeMap<String, String> = BTreeMap::new();
+    for ((_, name), text) in named.iter().zip(fetched) {
+        let text = text?;
+        agent::write(&run_dir.join("sources").join(name), &text)?;
+        if sources.insert(name.clone(), text).is_some() {
+            return Err(format!("Sources: two are named {name}; give one another name (`<where> as <name>`)"));
+        }
+    }
+    let mut task_sources: Vec<String> = Vec::new();
+    for task in &tasks {
+        let mut text = String::new();
+        for name in reads(&task.spec) {
+            let Some(s) = sources.get(&name) else { return Err(format!("task {} reads {name}, which the head's Sources do not name", task.n)) };
+            text += &format!("=== SOURCE: {name} ===\n{s}\n=== END ===\n");
+        }
+        if text.len() > MOST_SOURCES {
+            return Err(format!("task {} reads {} characters of sources; at most {MOST_SOURCES}: give it fewer, or cut them", task.n, text.len()));
+        }
+        task_sources.push(text);
+    }
     if let Some(bin) = &head.binary {
         agent::write(&o.dir.join("src/main.rs"), &format!("fn main() {{\n    if let Err(e) = {krate}::{bin}() {{\n        eprintln!(\"{{e}}\");\n        std::process::exit(1);\n    }}\n}}\n"))?;
     }
@@ -242,14 +347,27 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
         let d = run_dir.join("check").join(&task.module);
         // its own package, its library named as the crate (its tests say `crate_name::module`)
         agent::write(&d.join("Cargo.toml"), &format!("[package]\nname = \"check_{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"{krate}\"\npath = \"src/lib.rs\"\n\n[dependencies]\n{deps}", task.module))?;
-        agent::write(&d.join("src/lib.rs"), &format!("pub mod {};\n", task.module))?;
+        agent::write(&d.join("src/lib.rs"), &format!("{lib_top}pub mod {};\n", task.module))?;
+        for (name, text) in &used {
+            agent::write(&d.join(format!("src/{name}.rs")), text)?;
+        }
     }
-    code::step(&mut steps, "split and glue (no agent)", &mut t, &[]);
+    code::step(&mut steps, &format!("split and glue (no agent; {} sources fetched, {} existing modules)", sources.len(), used.len()), &mut t, &[]);
 
     // the shared prefix: the rules and the whole task, the same text for every agent (cached once)
     let rules = format!("You are one minion of a hive in Bottle Box: many minions build one crate together at the same time, sharing one Box (a registry of who builds what, a board). Each minion writes only its own piece. Rust, edition 2021, {}; the crate is `{krate}`, one module a task (`crate::<module>` inside it, `{krate}::<module>` from its tests); a module uses another only through the public API the task text gives it; tests run with `cargo test --release`. Lean code: the smallest code that does the task well. Rust has no default arguments: every call gives every argument of the registered signature.", if head.deps.is_empty() { "standard library only".to_string() } else { format!("dependencies: {}", head.deps.join("; ")) });
     let prefix = run_dir.join("prefix.txt");
-    agent::write(&prefix, &format!("{rules}\n\nTHE WHOLE TASK:\n{}\n", o.task))?;
+    let mut existing = String::new();
+    if !used.is_empty() {
+        existing += &format!("\n\nTHE CRATE ALREADY HOLDS these modules, written before: use them as they are (`crate::<module>`), do not write them again or change them: {}. Their source (without their own tests):\n", used.iter().map(|u| format!("`{}`", u.0)).collect::<Vec<_>>().join(", "));
+        for (name, text) in &used {
+            existing += &format!("=== EXISTING: src/{name}.rs ===\n{}=== END ===\n", without_tests(text));
+        }
+    }
+    if !head.attributes.is_empty() {
+        existing += &format!("\nThe crate's lib.rs begins with: {}. Write every module to compile under that.\n", head.attributes.join(" "));
+    }
+    agent::write(&prefix, &format!("{rules}{existing}\n\nTHE WHOLE TASK:\n{}\n", o.task))?;
     let setup = Setup { shared: Some(prefix), workdir: run_dir.clone(), read: Vec::new() };
     let ask = |id: &str, prompt: String, want: Want, effort: &str| -> Ask { Ask { tools: "".into(), max_output: Some(MINION_OUTPUT), effort: Some(effort.into()), ..Ask::minion(id, prompt.replace("tasks::", &format!("{krate}::")), &o.model, want) } };
     let src = |m: &str| format!("src/{m}.rs");
@@ -299,6 +417,9 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
 {{\"items\":[{{\"name\":\"{}::<item>\",\"kind\":\"fn|struct|enum|trait|const|type|impl\",\"signature\":\"<exact>\"}}],\"conventions\":\"<at most 3 short lines>\",\"cases\":[\"<a call of the API -> its exact result: at most 5>\"],\"lines\":<the implementation's lines>,\"sections\":[{{\"items\":[\"<item names>\"],\"lines\":<lines>}}]}}",
                 task.n, task.title, task.spec, task.module, task.module
             );
+            // the sources this task reads come before its question: its minions, who go on from this
+            // conversation, read them from the cache
+            let prompt = if task_sources[k].is_empty() { prompt } else { format!("The reference sources of your task, fetched for you (the facts to build from; write your own code, do not copy theirs):\n{}\n{prompt}", task_sources[k]) };
             let a = Ask { keep: true, resume: Some(warm_session.clone()), fork: true, ..ask(&format!("direct task {}", task.n), prompt, Want::Json, EFFORT) };
             let tx = tx.clone();
             let setup = &setup;
@@ -317,7 +438,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
                 let _ = agent::write(&d.join(p), c);
             }
             let lib: String = std::iter::once(tasks[k].module.clone()).chain(mods).map(|m| format!("pub mod {m};\n")).collect();
-            let _ = agent::write(&d.join("src/lib.rs"), &lib);
+            let _ = agent::write(&d.join("src/lib.rs"), &format!("{lib_top}{lib}"));
             let target = &target;
             s.spawn(move || {
                 let (ok, text, _, _) = code::test_in(&d, Some(target));
@@ -569,7 +690,7 @@ pub fn run(o: &Options, mode: String, run_dir: PathBuf, wall: Instant) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{join, reserve};
+    use super::{bring, header, join, reads, reserve, source, without_tests};
 
     #[test]
     fn minions_are_reserved_by_the_tasks_size() {
@@ -591,6 +712,48 @@ mod tests {
         // the case of exhaust.rs and controls.rs (E0753): one section that starts with `//!`
         let got = join(&["//! The pipe.\n\nuse std::f32::consts::PI;\n\npub fn a() -> f32 { PI }\n".into()]);
         assert_eq!(got, "//! The pipe.\n\nuse std::f32::consts::PI;\n\npub fn a() -> f32 { PI }\n");
+    }
+
+    #[test]
+    fn the_head_names_sources_existing_modules_and_attributes() {
+        let h = header("Crate: arch\nSources: https://x.org/a/fwsec.c; C:/src/ga102.c as falcon_ga102.c\nSources: notes.txt\nUses: ../crate/src/nvidia.rs\nAttributes: #![no_std]\nAttributes: extern crate alloc;\n\n1. falcon: the loader [reads: fwsec.c, falcon_ga102.c]\n");
+        assert_eq!((h.krate.as_str(), h.sources.len(), h.uses.len()), ("arch", 3, 1));
+        assert_eq!(h.attributes, ["#![no_std]", "extern crate alloc;"]);
+        let named: Vec<(String, String)> = h.sources.iter().map(|e| source(e)).collect();
+        assert_eq!(named[0], ("https://x.org/a/fwsec.c".to_string(), "fwsec.c".to_string()));
+        assert_eq!(named[1], ("C:/src/ga102.c".to_string(), "falcon_ga102.c".to_string()));
+        assert_eq!(source("https://x.org/raw/base.c?ref=master").1, "base.c");
+        assert_eq!(source("C:\\src\\hs.h").1, "hs.h");
+        // a head without them is as before
+        let plain = header("Crate: a\n1. one: x\n");
+        assert!(plain.sources.is_empty() && plain.uses.is_empty() && plain.attributes.is_empty());
+    }
+
+    #[test]
+    fn a_task_names_what_it_reads() {
+        assert_eq!(reads("the loader [reads: fwsec.c, falcon_ga102.c] with a timeout"), ["fwsec.c", "falcon_ga102.c"]);
+        assert_eq!(reads("the loader [reads: one.h"), ["one.h"]);
+        assert!(reads("nothing to read. reads: no").is_empty());
+    }
+
+    #[test]
+    fn an_existing_module_is_shown_without_its_tests() {
+        let text = "pub fn a() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n";
+        assert_eq!(without_tests(text), "pub fn a() {}\n\n");
+        // a cfg(test) on an item inside the module is not its end
+        let inner = "#[cfg(test)]\nextern crate std;\npub fn a() {}\n";
+        assert_eq!(without_tests(inner), inner);
+    }
+
+    #[test]
+    fn a_source_is_brought_from_a_file() {
+        let d = std::env::temp_dir().join(format!("bottlebox-source-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("a.h");
+        std::fs::write(&f, "#define A 1\n").unwrap();
+        assert_eq!(bring(&f.display().to_string()).unwrap(), "#define A 1\n");
+        assert!(bring(&d.join("none.h").display().to_string()).unwrap_err().contains("none.h"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
